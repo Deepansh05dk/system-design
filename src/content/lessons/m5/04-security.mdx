@@ -1,0 +1,99 @@
+---
+title: Security Basics for System Design
+slug: security-basics
+description: Defense in depth. Encryption, DDoS protection, input validation, secrets management, least privilege, and the security points interviewers expect you to mention.
+module: m5
+order: 4
+minutes: 13
+---
+
+<Callout type="problem">
+You've designed a fast, scalable, reliable system. Then an attacker floods it with 2 million requests per second, someone guesses that `/api/orders/1002` shows another user's order, a leaked API key in a public Git repo gives full database access, and a crafted search query dumps your users table. **Scale doesn't matter if the system isn't safe.**
+</Callout>
+
+Security is a huge field. For system design interviews, you need the **main layers** and the **classic mistakes**.
+
+## Defense in depth
+
+No single protection is perfect, so stack several layers. An attacker must get through **all** of them:
+
+<ArchFlow
+  title="Layers of defense on a request path"
+  height={300}
+  nodes={[
+    { id: 'u', label: 'Internet', sub: 'users + attackers', kind: 'user', x: 90, y: 150 },
+    { id: 'cdn', label: 'CDN + WAF', sub: 'DDoS absorption', kind: 'cdn', x: 280, y: 150 },
+    { id: 'gw', label: 'API gateway', sub: 'authN, rate limits', kind: 'gateway', x: 480, y: 150 },
+    { id: 'svc', label: 'Services', sub: 'authZ, validation', kind: 'service', x: 680, y: 70 },
+    { id: 'db', label: 'Database', sub: 'private subnet, encrypted', kind: 'db', x: 820, y: 220 },
+  ]}
+  edges={[
+    { from: 'u', to: 'cdn', label: 'HTTPS' },
+    { from: 'cdn', to: 'gw' },
+    { from: 'gw', to: 'svc', label: 'mTLS' },
+    { from: 'svc', to: 'db', label: 'least-privilege user' },
+  ]}
+  steps={[
+    { title: 'Edge: absorb floods and obvious attacks', text: 'The CDN’s huge global capacity absorbs volumetric <b>DDoS</b> attacks. A <b>WAF</b> (web application firewall) blocks known attack patterns (SQL injection strings, bad bots) before they reach you.', add: ['u', 'cdn'], flow: ['u>cdn'] },
+    { title: 'Gateway: who are you, and how often?', text: '<b>Authentication</b> (valid token?) and <b>rate limiting</b> per user/IP/API key. Only the gateway is publicly reachable.', add: ['gw'], flow: ['cdn>gw'] },
+    { title: 'Services: are you allowed, and is the input sane?', text: '<b>Authorization</b> on every resource (“does order 1002 belong to this user?”), and strict <b>input validation</b>. Service-to-service calls use <b>mTLS</b> so services can verify each other.', add: ['svc'], flow: ['gw>svc'] },
+    { title: 'Data: minimal access, encrypted', text: 'Databases live in <b>private subnets</b> with no internet access. Each service gets its own DB credentials with <b>least privilege</b>. Data is <b>encrypted at rest</b>, backups too.', add: ['db'], flow: ['svc>db'] },
+  ]}
+/>
+
+## The essentials checklist
+
+**Encryption**
+- **In transit:** HTTPS/TLS everywhere, including inside your network (mTLS) for sensitive systems.
+- **At rest:** disk/database/backup encryption (managed keys via KMS). Hash passwords with **bcrypt/scrypt/Argon2** (slow, salted), never store them encrypted or plain.
+
+**Authentication & authorization** (Module 4)
+- Short-lived tokens, MFA for sensitive actions.
+- Check **ownership on every request**. The #1 API vulnerability (OWASP API Top 10) is **BOLA/IDOR**: `/orders/1002` returning someone else's order because the server only checked "is logged in", not "is it yours". Random, non-sequential public IDs make guessing harder, but the **check** is the real fix.
+
+**Input handling**
+- **SQL injection:** always use parameterized queries / ORM bindings, never string concatenation.
+- **XSS:** escape output, use a Content Security Policy (you know this from frontend!).
+- **Validation:** allow-lists, size limits on uploads and request bodies, file type checks.
+
+**DDoS and abuse**
+- <Term k="ddos">DDoS</Term> protection at the edge (CDN, Cloudflare, AWS Shield), autoscaling, rate limiting, CAPTCHAs on sensitive forms, timeouts so slow attacks can't hold connections forever.
+
+**Secrets**
+- Never in code or Git. Use a **secrets manager** (AWS Secrets Manager, Vault), inject at runtime, **rotate** regularly.
+
+**Least privilege & isolation**
+- Every service, person and API key gets the **minimum permissions** needed.
+- Network segmentation: public subnet only for load balancers; everything else private.
+
+**Audit & monitoring**
+- Log security events (logins, permission changes, admin actions) to tamper-resistant storage; alert on anomalies.
+
+**Privacy & compliance**
+- Collect less, encrypt PII, support deletion (GDPR "right to be forgotten"), keep data in required regions (data residency), PCI-DSS for card data (usually: let Stripe/Razorpay handle raw card numbers so they never touch your servers).
+
+<Callout type="frontend">
+Your frontend security knowledge counts here: **CSP**, **XSS** escaping, **CSRF** tokens / SameSite cookies, **CORS** configured narrowly, HttpOnly cookies for tokens, and **Subresource Integrity** for CDN scripts. Mention these when a design includes a web client.
+</Callout>
+
+<Callout type="interview">
+You don't need a security deep-dive in most interviews, but a 30-second pass is a strong signal: "**TLS everywhere**, auth at the gateway, **authorization checks on resource ownership**, **rate limiting**, **WAF/DDoS** protection at the CDN, DB in a **private subnet** with **encryption at rest**, secrets in a **secrets manager**, and card data handled by the **payment provider** (PCI scope reduction)."
+</Callout>
+
+<Takeaways>
+- **Defense in depth:** edge (CDN/WAF/DDoS) → gateway (authN, rate limits) → services (authZ, validation, mTLS) → data (private, encrypted, least privilege).
+- Biggest real-world API bug: **missing ownership checks (BOLA/IDOR)**.
+- **Parameterized queries**, output escaping, input limits.
+- Secrets in a **manager**, never in code; **least privilege** everywhere; hash passwords with **bcrypt/Argon2**.
+</Takeaways>
+
+<Quiz
+  id="security"
+  questions={[
+    { q: 'A logged-in user changes /orders/1001 to /orders/1002 and sees another customer’s order. What is missing?', options: ['HTTPS', 'An authorization (ownership) check on the resource', 'Rate limiting', 'A CDN'], answer: 1, explain: 'This is BOLA/IDOR, the most common API vulnerability. Authentication alone isn’t enough.' },
+    { q: 'How should passwords be stored?', options: ['Encrypted with AES', 'Plain text in a secure DB', 'Hashed with a slow, salted algorithm like bcrypt/Argon2', 'Base64-encoded'], answer: 2, explain: 'Slow salted hashes make leaked password tables very expensive to crack.' },
+    { q: 'What best prevents SQL injection?', options: ['Hiding error messages', 'Parameterized queries / prepared statements', 'Using NoSQL', 'A firewall only'], answer: 1, explain: 'User input is passed as data, never concatenated into SQL code.' },
+    { q: 'Where should the database live network-wise?', options: ['Public subnet with a strong password', 'Private subnet, reachable only from app servers', 'On the CDN', 'In the browser'], answer: 1, explain: 'No direct internet access shrinks the attack surface dramatically.' },
+    { q: 'A huge volumetric DDoS attack hits your site. Which layer helps most?', options: ['Database indexes', 'CDN / edge DDoS protection with massive global capacity', 'Adding a column', 'JWTs'], answer: 1, explain: 'Edge networks absorb and filter floods before they reach your origin.' },
+  ]}
+/>

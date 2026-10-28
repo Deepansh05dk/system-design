@@ -1,0 +1,73 @@
+---
+title: Disaster Recovery & Multi-Region
+slug: disaster-recovery
+description: When a whole data center or region goes down. Backups, RPO and RTO, standby strategies, and what “multi-region active-active” really involves.
+module: m5
+order: 3
+minutes: 13
+---
+
+<Callout type="problem">
+A fire, a flood, a power grid failure, or simply a cloud provider's bad configuration push, and an entire region goes offline for 8 hours. It has happened to every major cloud provider. Or worse: an engineer runs a script that deletes the production database. **Can your company survive this? How much data would you lose, and how long until you're back?**
+</Callout>
+
+## Two numbers define your plan
+
+- **<Term k="rpo">RPO</Term> (Recovery Point Objective):** how much **data** can you afford to lose? "RPO = 1 hour" means losing the last hour of writes is acceptable.
+- **RTO (Recovery Time Objective):** how long can you afford to be **down**? "RTO = 4 hours" means you must be back within 4 hours.
+
+Smaller numbers = safer = more expensive. A bank's ledger might need RPO ≈ 0, RTO of minutes. An internal reporting tool might accept RPO 24 h, RTO 1 day.
+
+## Failure domains
+
+Cloud providers split the world into:
+- **Regions** (e.g. Mumbai, Frankfurt): far apart, independent.
+- **Availability zones (AZs)** inside a region: separate data centers with separate power and networking, a few km apart, connected by fast links.
+
+Running across **multiple AZs** in one region protects against a single data center failing and is cheap and standard (most managed databases offer "multi-AZ" with synchronous replication). Surviving a **whole region** going down needs a **multi-region** plan.
+
+## The strategies
+
+<DrStrategySim />
+
+## Backups: the last line of defense
+
+Replication protects against machines dying, but **not** against bad writes: if someone runs `DELETE FROM orders` by mistake, replication faithfully deletes it everywhere within milliseconds. You also need:
+
+- **Regular backups** + **point-in-time recovery** (continuous WAL archiving lets you restore to "10:41:59, just before the bad script").
+- Backups stored in **another region/account**, ideally immutable (protection from ransomware or a compromised account).
+- **Tested restores.** A backup you've never restored is a hope, not a backup. Run restore drills.
+- Remember the 3-2-1 rule: 3 copies, 2 different media/services, 1 off-site.
+
+## Multi-region active-active: the hard parts
+
+Serving users from several regions at once gives the best latency and resilience, but:
+- **Data replication across regions** is slow (~100+ ms), so writes are either slow (synchronous, strongly consistent) or conflicting (asynchronous, multi-leader).
+- **Conflict resolution:** two regions update the same record at the same moment. Options: last-write-wins, CRDTs, or **home-region per user** (each user's writes go to one region, avoiding conflicts).
+- **Routing:** GeoDNS / anycast send users to the nearest healthy region, and away from a failed one.
+- **Cost:** you pay for (at least) double capacity, so each region can absorb the other's traffic.
+
+<Callout type="analogy">
+RPO is "how many pages of your notebook can you afford to lose?" RTO is "how long can you go without a notebook?" Photocopying every page instantly into a second notebook in another city (active-active) is safest and most expensive. Photocopying once a week and keeping it at home (backup & restore) is cheap, but you might lose a week and spend a day rebuilding.
+</Callout>
+
+<Callout type="interview">
+For most designs, say: "Deployed across **3 availability zones**; DB with **synchronous standby** in another AZ and automatic failover; **daily snapshots + point-in-time recovery** in another region." For global, high-availability products (payments, messaging), discuss **multi-region** and the hard part: **cross-region data consistency** (e.g. home region per user, async replication with RPO of seconds).
+</Callout>
+
+<Takeaways>
+- **RPO** = acceptable data loss; **RTO** = acceptable downtime. They drive the design and the cost.
+- **Multi-AZ** protects against data center failures (standard); **multi-region** protects against region failures (costly).
+- Strategies: **backup & restore → pilot light → warm standby → active-active** (more protection, more cost).
+- Replication isn't backup: keep **point-in-time, off-site, tested** backups.
+</Takeaways>
+
+<Quiz
+  id="dr"
+  questions={[
+    { q: 'An RPO of 5 minutes means…', options: ['You must recover within 5 minutes', 'You can lose at most the last 5 minutes of data', 'Backups take 5 minutes', 'Failover happens every 5 minutes'], answer: 1, explain: 'RPO is about data loss. RTO is about recovery time.' },
+    { q: 'Someone accidentally deletes a table. Why don’t read replicas save you?', options: ['Replicas are slower', 'Replication copies the delete to all replicas within moments', 'Replicas don’t store tables', 'They do save you'], answer: 1, explain: 'Replication protects against hardware failure, not bad writes. You need backups / point-in-time recovery.' },
+    { q: 'Which strategy has the lowest RTO and RPO?', options: ['Backup & restore', 'Pilot light', 'Warm standby', 'Multi-region active-active'], answer: 3, explain: 'Both regions serve traffic constantly, so failover is nearly instant and data is continuously replicated.' },
+    { q: 'What is the hardest part of multi-region active-active?', options: ['DNS', 'Keeping data consistent and resolving conflicting writes across regions', 'Buying servers', 'TLS certificates'], answer: 1, explain: 'Cross-region latency forces a choice between slow synchronous writes and conflict handling.' },
+  ]}
+/>

@@ -1,0 +1,96 @@
+---
+title: "Real-Time: Polling, Long Polling, SSE & WebSockets"
+slug: real-time-communication
+description: How servers push updates to clients, and how to scale a million open connections. The foundation for chat, live scores and notifications.
+module: m4
+order: 2
+minutes: 16
+---
+
+<Callout type="problem">
+HTTP is request → response: the **client always asks first**. But a chat message, a live score or a "your food is out for delivery" update starts on the **server**. How does the server tell the browser something happened, when the browser didn't ask?
+</Callout>
+
+## Four techniques
+
+<RealtimeSim />
+
+| Technique | Direction | How | Latency | Server cost | Use for |
+|---|---|---|---|---|---|
+| **Short polling** | Client → server | Ask every N seconds | Up to N seconds | Many wasted requests | Dashboards refreshed every minute; simple MVPs |
+| <Term k="long-polling">**Long polling**</Term> | Client → server (held) | Server holds the request until news or timeout | Low | One pending request per client | Fallback when WebSockets are blocked; older chat systems |
+| <Term k="sse">**Server-Sent Events**</Term> | Server → client | One long HTTP response streaming `data:` lines | Low | One open connection per client | Live feeds, notifications, stock tickers, **AI token streaming** |
+| <Term k="websocket">**WebSocket**</Term> | **Both ways** | HTTP upgrade to a persistent full-duplex TCP connection | Lowest | One open connection per client | Chat, multiplayer games, collaborative editing, live cursors |
+
+<Callout type="frontend">
+- `setInterval(() => fetch('/api/updates'), 3000)` = short polling.
+- `new EventSource('/stream')` = SSE (auto-reconnects for free!). ChatGPT-style streaming answers commonly use SSE.
+- `new WebSocket('wss://...')` = WebSocket (you handle reconnect + heartbeats yourself, or use Socket.IO).
+</Callout>
+
+### How to choose
+
+- **Need the client to send frequent messages too** (chat, games, collaborative editing)? → **WebSocket**.
+- **Only server → client updates** (notifications, live scores, progress, streaming text)? → **SSE**: simpler, plain HTTP, works with existing auth/proxies, auto-reconnect.
+- **Updates are rare and a delay is fine?** → **polling** is the simplest and most robust.
+
+## Scaling WebSockets: the real interview question
+
+A WebSocket is a **long-lived connection to one specific server**. That changes everything:
+
+<ArchFlow
+  title="Delivering a chat message across WebSocket servers"
+  height={360}
+  nodes={[
+    { id: 'a', label: 'Asha', sub: 'connected to WS-1', kind: 'mobile', x: 90, y: 90 },
+    { id: 'b', label: 'Ravi', sub: 'connected to WS-3', kind: 'mobile', x: 90, y: 280 },
+    { id: 'lb', label: 'L4/L7 LB', sub: 'sticky per connection', kind: 'lb', x: 270, y: 185 },
+    { id: 'ws1', label: 'WS server 1', kind: 'server', x: 470, y: 90 },
+    { id: 'ws3', label: 'WS server 3', kind: 'server', x: 470, y: 280 },
+    { id: 'reg', label: 'Presence / routing', sub: 'user → server (Redis)', kind: 'cache', x: 760, y: 70 },
+    { id: 'bus', label: 'Pub/Sub', sub: 'Redis / Kafka', kind: 'queue', x: 760, y: 280 },
+  ]}
+  edges={[
+    { from: 'a', to: 'lb' },
+    { from: 'b', to: 'lb' },
+    { from: 'lb', to: 'ws1' },
+    { from: 'lb', to: 'ws3' },
+    { from: 'ws1', to: 'reg', label: 'where is Ravi?' },
+    { from: 'ws1', to: 'bus', label: 'publish' },
+    { from: 'bus', to: 'ws3', label: 'deliver' },
+  ]}
+  steps={[
+    { title: 'Each user holds one connection to one server', text: 'Asha’s phone keeps a WebSocket open to WS-1, Ravi’s to WS-3. A server might hold 50K–500K connections; they cost memory, not much CPU.', add: ['a', 'b', 'lb', 'ws1', 'ws3'], flow: ['a>lb', 'lb>ws1', 'b>lb', 'lb>ws3'] },
+    { title: 'Asha sends a message to Ravi', text: 'It arrives at WS-1. But Ravi isn’t connected to WS-1! WS-1 needs to find which server holds Ravi’s connection.', flow: ['a>lb', 'lb>ws1'] },
+    { title: 'Look up where Ravi is connected', text: 'A <b>presence/routing store</b> (e.g. Redis: <code>user:ravi → ws-3</code>) is updated whenever users connect or disconnect.', add: ['reg'], flow: ['ws1>reg', 'reg>ws1'] },
+    { title: 'Route via pub/sub', text: 'WS-1 publishes the message to WS-3’s channel (or a channel per user/room) on a <b>pub/sub</b> system. WS-3 is subscribed, receives it, and pushes it down Ravi’s socket.', add: ['bus'], flow: ['ws1>bus', 'bus>ws3', 'ws3>lb', 'lb>b'] },
+  ]}
+/>
+
+Other things to handle:
+- **Load balancing:** the connection stays on one server, so balance on **connection count** (least connections), not requests.
+- **Heartbeats (ping/pong)** every ~30 s to detect dead connections and keep NATs/proxies from closing idle ones.
+- **Reconnects:** mobile networks drop constantly. Clients reconnect with **backoff + jitter**, then fetch missed messages since the last message ID they saw. The socket is for speed; the **database is the source of truth**.
+- **Deploys:** restarting a WS server drops all its connections → drain gradually so thousands of clients don't reconnect at the same second (thundering herd!).
+- **Offline users:** if the user isn't connected, fall back to a **push notification** (APNs/FCM).
+
+<Callout type="interview">
+For chat/notifications/live features: "Clients keep a **WebSocket** (or **SSE** if one-way) to a fleet of stateless-ish gateway servers. A **presence store** maps users to servers; messages are routed through **pub/sub**. Messages are persisted first, so on reconnect clients sync from the last seen ID. Offline users get **push notifications**." That's the backbone of WhatsApp, Slack and live comments.
+</Callout>
+
+<Takeaways>
+- **Polling** (simple, wasteful) → **long polling** (held requests) → **SSE** (server→client stream) → **WebSocket** (two-way).
+- Pick **SSE** for one-way updates, **WebSocket** for two-way interaction, **polling** when delays are fine.
+- Scaling WebSockets: **sticky connections, presence store (user → server), pub/sub between servers, heartbeats, reconnect with backoff, sync from DB**.
+</Takeaways>
+
+<Quiz
+  id="realtime"
+  questions={[
+    { q: 'A live cricket score page only needs updates from the server. The simplest good choice?', options: ['WebSocket', 'Server-Sent Events', 'gRPC', 'Polling every 100 ms'], answer: 1, explain: 'One-way server → client streaming over plain HTTP with built-in reconnect: SSE.' },
+    { q: 'Which is best for a multiplayer game sending inputs 30 times per second both ways?', options: ['Short polling', 'Long polling', 'SSE', 'WebSocket'], answer: 3, explain: 'Frequent two-way messages need a persistent full-duplex connection.' },
+    { q: 'Asha (on WS server 1) messages Ravi (on WS server 3). How does server 1 deliver it?', options: ['It can’t', 'Looks up Ravi’s server in a presence store and routes via pub/sub to server 3', 'Sends an HTTP request to Ravi’s phone', 'Broadcasts to all users'], answer: 1, explain: 'A routing/presence store plus a pub/sub layer connects the WebSocket servers.' },
+    { q: 'Why should reconnecting clients use backoff with jitter?', options: ['To save battery', 'So a server restart doesn’t cause every client to reconnect at the same moment (thundering herd)', 'WebSocket requires it', 'To encrypt traffic'], answer: 1, explain: 'Spreading reconnections protects the servers that remain.' },
+    { q: 'What’s the main waste of short polling?', options: ['It needs WebSockets', 'Most requests return “nothing new” and updates can wait a full interval', 'It can’t use HTTPS', 'It only works on mobile'], answer: 1, explain: 'Lots of empty responses, and latency up to the polling interval.' },
+  ]}
+/>

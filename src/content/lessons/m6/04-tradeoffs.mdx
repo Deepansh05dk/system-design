@@ -1,0 +1,89 @@
+---
+title: "Trade-off Thinking: The “Why This, Not That?” Cheat Sheet"
+slug: tradeoff-thinking-checklist
+description: The core trade-offs of system design in one place, plus a checklist of questions to ask yourself about every design.
+module: m6
+order: 4
+minutes: 14
+---
+
+<Callout type="problem">
+Every design decision gives you something and costs you something. Senior engineers aren't the ones who know the "right" answer; they're the ones who can say **exactly what each option costs** and pick the one whose costs hurt least for **this** problem. This lesson collects the trade-offs you've learned into one toolbox.
+</Callout>
+
+## The big trade-offs
+
+| You want… | You pay with… | Example |
+|---|---|---|
+| **Consistency** | Latency, availability | Sync replication; quorum reads; CP during partitions |
+| **Availability** | Consistency (staleness, conflicts) | Async replication; AP stores; serving cached/stale data |
+| **Low read latency** | Write cost, storage, staleness | Caches, denormalization, precomputed feeds, indexes |
+| **Low write latency** | Read cost or durability risk | Write-back caches, LSM trees, async processing |
+| **Throughput** | Per-item latency | Batching, queues |
+| **Scalability** | Simplicity | Sharding, microservices, async everywhere |
+| **Simplicity** | Future flexibility / peak scale | Monolith, single DB |
+| **Durability** | Write latency, cost | Sync replication, multiple copies, fsync |
+| **Cost savings** | Performance, resilience | Fewer replicas, cold storage, smaller caches |
+| **Flexibility (generic)** | Performance (specialized) | Relational DB vs purpose-built stores |
+
+## Practice the classic pairs
+
+These are the "why this, not that?" questions you'll get asked most. Say your answer out loud, then flip:
+
+<Flashcards title="Classic trade-offs" />
+
+## The self-review checklist
+
+Before you say "done", run through this list against your design:
+
+**Requirements**
+- [ ] Does the design satisfy every functional requirement I wrote down?
+- [ ] Have I met the latency, availability and consistency targets?
+
+**Data**
+- [ ] For each store: why this database, what's the key/partition, what's the index for the main query?
+- [ ] What's the source of truth, and which copies (caches, search indexes, feeds) are derived?
+- [ ] How big will the data get? Does it need sharding? What's the shard key?
+
+**Scale**
+- [ ] Where's the bottleneck at 10× traffic?
+- [ ] Any hot keys or hot partitions? (celebrities, viral content, flash sales)
+- [ ] Read-heavy → caching/CDN/replicas? Write-heavy → queues/sharding/LSM stores?
+
+**Reliability**
+- [ ] Any single points of failure?
+- [ ] What happens when each component fails or is slow?
+- [ ] Are retries safe (idempotent)? Are there timeouts and circuit breakers?
+
+**Consistency & correctness**
+- [ ] Where can races happen (double booking, double charge)? How are they prevented?
+- [ ] Where is eventual consistency acceptable, and where is it not?
+
+**Operations**
+- [ ] How do we monitor it (key metrics, alerts)?
+- [ ] How do we deploy without downtime? How do we roll back?
+- [ ] Security: auth, authorization checks, encryption, rate limiting?
+
+<Callout type="tip">
+You won't have time to discuss every checkbox in an interview, and you shouldn't. But running through them **in your head** helps you spot the 2–3 most important issues to mention proactively.
+</Callout>
+
+<Callout type="interview">
+The best compliment from an interviewer is: "**You clearly understood the trade-offs.**" Practice saying each flashcard answer in the trade-off sentence form: choice → because → cost → why acceptable → when you'd switch.
+</Callout>
+
+<Takeaways>
+- Every choice buys something and costs something. **Name both.**
+- The big axes: **consistency ↔ availability/latency, read speed ↔ write cost, throughput ↔ latency, scale ↔ simplicity, durability ↔ speed, performance ↔ cost**.
+- Run the **self-review checklist** before declaring a design finished.
+</Takeaways>
+
+<Quiz
+  id="tradeoffs"
+  questions={[
+    { q: 'Adding a cache in front of the database usually trades…', options: ['Read latency for nothing', 'Freshness (possible staleness) and complexity for faster reads', 'Durability for consistency', 'Throughput for latency'], answer: 1, explain: 'Caches are copies, so they can be stale, and invalidation adds complexity.' },
+    { q: 'Synchronous replication to a remote region gives stronger durability at the cost of…', options: ['Read throughput', 'Higher write latency (and availability if the remote is down)', 'Storage', 'Nothing'], answer: 1, explain: 'Each write waits for the remote copy to confirm.' },
+    { q: 'Batching writes increases throughput but…', options: ['Lowers durability always', 'Can increase per-item latency', 'Breaks consistency', 'Requires sharding'], answer: 1, explain: 'Items wait for the batch to fill or a timer to fire.' },
+    { q: 'Which item belongs on the “reliability” part of a self-review?', options: ['Which font to use', 'Single points of failure and behaviour when components fail', 'The color of the diagram', 'Estimation precision'], answer: 1, explain: 'Reliability is about failure modes and redundancy.' },
+  ]}
+/>

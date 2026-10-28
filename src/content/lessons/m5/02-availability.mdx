@@ -1,0 +1,82 @@
+---
+title: Availability, SLAs, SLOs & SLIs
+slug: availability-and-slas
+description: What “99.99% uptime” really costs, how availability multiplies across components, and how teams use error budgets to balance speed and reliability.
+module: m5
+order: 2
+minutes: 12
+---
+
+<Callout type="problem">
+Your manager asks for "100% uptime". Your cloud provider promises 99.99% for its load balancer and 99.95% for its database. Your own code has bugs and you deploy 10 times a day. **What availability can you realistically promise? And how do you decide when to slow down and fix reliability instead of shipping features?**
+</Callout>
+
+## Availability in “nines”
+
+<Term k="availability">Availability</Term> = the fraction of time (or of requests) the system works correctly.
+
+<NinesCalc />
+
+| Availability | Name | Downtime per year | Per month |
+|---|---|---|---|
+| 99% | two nines | ~3.65 days | ~7.2 hours |
+| 99.9% | three nines | ~8.8 hours | ~43 minutes |
+| 99.95% | | ~4.4 hours | ~22 minutes |
+| 99.99% | four nines | ~53 minutes | ~4.3 minutes |
+| 99.999% | five nines | ~5.3 minutes | ~26 seconds |
+
+Each extra nine is **10× less downtime** and usually much **more than 10× the cost**: redundancy everywhere, multiple regions, automated failover, careful deploys and on-call engineers.
+
+## Availability math
+
+- **In series** (A calls B calls C): multiply. 99.9% × 99.9% × 99.9% ≈ **99.7%**. Every dependency on the critical path lowers your availability.
+- **In parallel** (two independent copies, either can serve): 1 − (1 − A)². Two 99% copies → **99.99%**. That's why redundancy works.
+
+Practical consequences: reduce critical-path dependencies, make non-critical features **degrade gracefully** instead of failing the request, and add redundancy where it counts.
+
+## SLI, SLO, SLA
+
+<Term k="sla">These three acronyms</Term> come up a lot:
+
+| Term | What it is | Example | Who cares |
+|---|---|---|---|
+| **SLI** (indicator) | A measurement | % of checkout requests that succeed in < 500 ms | Engineers |
+| **SLO** (objective) | Your **internal target** for an SLI | 99.9% over 30 days | The team |
+| **SLA** (agreement) | A **contract** with customers, with penalties (refunds, credits) | 99.5%, or we refund 10% | Business, legal |
+
+The SLA is always **looser** than the SLO, so you get an internal warning before you owe anyone money.
+
+## Error budgets: turning reliability into a decision
+
+If the SLO is 99.9%, you're **allowed** 0.1% failure: about 43 minutes a month. That's the **error budget**.
+
+- Budget left? → Ship features, take risks, deploy often.
+- Budget burned? → Freeze risky launches; spend time on reliability work.
+
+This turns "move fast" vs "be stable" from an argument into a number both product and engineering agree on. (This idea comes from Google's SRE practice.)
+
+<Callout type="why" title="Why not aim for 100%?">
+Users can't tell 99.999% from 100%, because their own Wi-Fi, phone and ISP fail far more often than that. Chasing 100% makes every change terrifyingly slow and expensive. Pick the target that matches what users actually need: a payment system needs more nines than an internal admin dashboard.
+</Callout>
+
+<Callout type="interview">
+In the non-functional requirements, state a target: "**99.99% availability** for reading the feed, **99.9%** for posting." Later, justify your redundancy with it: "To reach four nines we need no single point of failure, multi-AZ deployment and automatic failover." Knowing that **3 nines ≈ 8.8 h/year** and **4 nines ≈ 53 min/year** off the top of your head is impressive.
+</Callout>
+
+<Takeaways>
+- Each extra **nine** = 10× less downtime and much higher cost.
+- **Series** components multiply availability (it gets worse); **parallel** copies improve it: 1 − (1 − A)².
+- **SLI** = measurement, **SLO** = internal target, **SLA** = contract with penalties (looser than the SLO).
+- **Error budgets** turn reliability into a shared decision rule.
+</Takeaways>
+
+<Quiz
+  id="availability"
+  questions={[
+    { q: 'About how much downtime per year does 99.9% allow?', options: ['~53 minutes', '~8.8 hours', '~3.6 days', '~5 minutes'], answer: 1, explain: '0.1% of 8,760 hours ≈ 8.76 hours.' },
+    { q: 'A request passes through 3 components, each 99.9% available. Overall availability?', options: ['99.9%', '~99.7%', '~99.99%', '99%'], answer: 1, explain: 'Series availability multiplies: 0.999³ ≈ 0.997.' },
+    { q: 'Two independent servers, each 99% available, and either can serve traffic. Combined availability?', options: ['98%', '99%', '99.99%', '100%'], answer: 2, explain: 'Both must fail: 1 − 0.01² = 0.9999.' },
+    { q: 'Which is a contract with customers that includes penalties?', options: ['SLI', 'SLO', 'SLA', 'RTO'], answer: 2, explain: 'The SLA is the external agreement; SLOs are internal targets.' },
+    { q: 'The team has used all of this month’s error budget. What does the policy usually say?', options: ['Ship more features faster', 'Pause risky releases and prioritize reliability work', 'Lower the SLA', 'Nothing'], answer: 1, explain: 'An exhausted budget shifts focus to stability until it recovers.' },
+  ]}
+/>

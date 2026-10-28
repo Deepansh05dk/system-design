@@ -1,0 +1,116 @@
+---
+title: The System Design Interview Framework
+slug: the-4-step-framework
+description: A repeatable plan for any “Design X” question. What to do in each phase, how long to spend, and what interviewers are actually scoring.
+module: m6
+order: 1
+minutes: 13
+---
+
+<Callout type="problem">
+"Design WhatsApp. You have 45 minutes." A blank whiteboard and a huge, vague problem. Most candidates fail not because they don't know about caches and queues, but because they **jump straight into drawing boxes**, design the wrong thing, run out of time, or never explain **why**. A simple, repeatable structure fixes all of that.
+</Callout>
+
+## What interviewers are scoring
+
+There's no single correct design. Interviewers judge **how you think**:
+
+| Signal | What it looks like |
+|---|---|
+| **Problem scoping** | You ask good questions and agree on scope before designing |
+| **Structured approach** | You move through clear phases; the conversation is easy to follow |
+| **Technical breadth** | You know the building blocks (caches, queues, DBs, CDNs…) and when to use them |
+| **Depth where it matters** | You can go deep on the hardest 1–2 parts |
+| **Trade-off reasoning** | Every choice has a "because", and you know what you're giving up |
+| **Communication** | You think out loud, check in with the interviewer, adapt to hints |
+| **Practical maturity** | You consider failures, monitoring, cost, and evolution over time |
+
+For senior roles, **trade-offs and depth** weigh more. For junior roles, **structure and fundamentals** weigh more.
+
+## The framework
+
+Click through the phases:
+
+<InterviewTimeline />
+
+### 1. Requirements (~5 min)
+**Functional:** what the system does (the 3–5 core features). **Non-functional:** how well it does it (scale, latency, availability, consistency, durability). Write both on the board. Next lesson covers this in detail.
+
+### 2. Estimation (~3–5 min)
+Quick math for QPS, storage, bandwidth (Module 0). Then **conclude**: read-heavy? write-heavy? does it fit on one machine? Skip or shorten if the interviewer says so.
+
+### 3. API and data model (~5 min)
+- APIs: a handful of endpoints, e.g. `POST /messages`, `GET /conversations/{id}/messages?cursor=…`.
+- Data: main entities, keys, which database and why, the index for the main query.
+
+### 4. High-level design (~10–15 min)
+Draw the main components and walk through **each core feature as a request flow**. Start simple and add components only with a reason:
+
+> "Reads are 100× writes, so I'll add a cache here." "Uploads are slow, so the API returns immediately and a queue triggers processing."
+
+### 5. Deep dives (~10–15 min)
+Pick the **hardest parts** (or follow the interviewer's lead): the feed fan-out, the hot key, the consistency of bookings, the real-time delivery. Compare 2–3 options, choose one, explain the trade-off. Address scale (sharding, caching) and failures ("what if this dies?").
+
+### 6. Wrap-up (~3–5 min)
+Summarize, name bottlenecks and risks, mention monitoring and security briefly, say what you'd do at 10× scale.
+
+<Callout type="tip">
+The framework is a guide, not a script. If the interviewer says "skip estimation" or "let's focus on the feed", **follow them**. Being adaptable is part of the evaluation.
+</Callout>
+
+## Start simple, then evolve
+
+A great habit: first draw a design that **works** for the requirements at small scale, then **evolve** it as you apply the numbers:
+
+<ArchFlow
+  title="Evolving a design instead of starting complex"
+  height={330}
+  nodes={[
+    { id: 'c', label: 'Clients', kind: 'client', x: 90, y: 165 },
+    { id: 'lb', label: 'Load balancer', kind: 'lb', x: 270, y: 165 },
+    { id: 'app', label: 'App servers', kind: 'server', x: 460, y: 165 },
+    { id: 'db', label: 'Primary DB', kind: 'db', x: 680, y: 165 },
+    { id: 'cache', label: 'Cache', kind: 'cache', x: 680, y: 50 },
+    { id: 'rep', label: 'Read replicas', kind: 'db', x: 860, y: 165 },
+    { id: 'q', label: 'Queue + workers', kind: 'queue', x: 460, y: 290 },
+    { id: 'cdn', label: 'CDN', kind: 'cdn', x: 270, y: 50 },
+  ]}
+  edges={[
+    { from: 'c', to: 'app', manual: true, curve: 40 },
+    { from: 'c', to: 'lb' },
+    { from: 'lb', to: 'app' },
+    { from: 'app', to: 'db' },
+    { from: 'app', to: 'cache' },
+    { from: 'db', to: 'rep', dashed: true },
+    { from: 'app', to: 'q' },
+    { from: 'c', to: 'cdn' },
+  ]}
+  steps={[
+    { title: 'v1: the simplest thing that works', text: 'Clients → app server → database. Say it out loud: “This works for the functional requirements. Now let’s scale it.”', add: ['c', 'app', 'db', 'c>app'], flow: ['c>app', 'app>db'] },
+    { title: 'Many users → many app servers', text: 'Stateless app servers behind a load balancer.', add: ['lb'], remove: ['c>app'], flow: ['c>lb', 'lb>app'] },
+    { title: 'Read-heavy → cache + replicas', text: 'Estimation said 100:1 reads. Add a cache for hot data and read replicas.', add: ['cache', 'rep'], flow: ['app>cache', 'db>rep'] },
+    { title: 'Slow work → async', text: 'Notifications and media processing move to a queue + workers.', add: ['q'], flow: ['app>q'] },
+    { title: 'Global users + media → CDN', text: 'Static files and media come from a CDN. Every box exists for a stated reason.', add: ['cdn'], flow: ['c>cdn'] },
+  ]}
+/>
+
+<Callout type="mistake">
+Drawing Kafka, Cassandra, Redis, Elasticsearch and 12 microservices in the first 5 minutes "because big companies use them". Interviewers call this **cargo-culting**. Every component adds cost and complexity; add each one **in response to a requirement or a number**.
+</Callout>
+
+<Takeaways>
+- Interviewers score **scoping, structure, breadth, depth, trade-offs, communication, maturity**.
+- Phases: **Requirements → Estimation → API & data → High-level → Deep dives → Wrap-up**.
+- **Start simple and evolve**; add components only with a reason.
+- Follow the interviewer's lead and keep talking through your reasoning.
+</Takeaways>
+
+<Quiz
+  id="framework"
+  questions={[
+    { q: 'What should you do first when given “Design Twitter”?', options: ['Draw the architecture', 'Pick the database', 'Clarify requirements and scope', 'Estimate storage'], answer: 2, explain: 'Agreeing on scope prevents designing the wrong thing and shows structured thinking.' },
+    { q: 'Why “start simple and evolve”?', options: ['To save marker ink', 'So every component is justified by a requirement or number, and the interviewer can follow your reasoning', 'Because simple designs always win', 'Interviewers require it'], answer: 1, explain: 'Evolving from a working baseline shows reasoning instead of memorized architecture.' },
+    { q: 'The interviewer says “let’s skip estimation and focus on real-time delivery.” You should…', options: ['Insist on finishing estimation', 'Adapt and go to the real-time deep dive', 'Start over', 'Ask for more time'], answer: 1, explain: 'Adaptability and following hints are part of the evaluation.' },
+    { q: 'Which is the strongest signal for senior candidates?', options: ['Naming many technologies', 'Clear trade-off reasoning and depth on the hardest parts', 'Drawing fast', 'Exact estimation numbers'], answer: 1, explain: 'Senior engineers are expected to weigh options and go deep where it matters.' },
+  ]}
+/>

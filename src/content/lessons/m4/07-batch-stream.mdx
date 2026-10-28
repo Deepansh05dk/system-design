@@ -1,0 +1,98 @@
+---
+title: Batch vs Stream Processing
+slug: batch-vs-stream-processing
+description: Processing huge amounts of data. MapReduce and Spark for batch jobs, Kafka streams and Flink for real time, and when to use each.
+module: m4
+order: 7
+minutes: 14
+---
+
+<Callout type="problem">
+YouTube needs to (1) compute each creator's monthly earnings from billions of views, (2) show a live view counter while a video premieres, and (3) detect a sudden spike of fraudulent views within seconds. One job can wait until tomorrow; the others can't wait a minute. **These are two different styles of data processing.**
+</Callout>
+
+## Two styles
+
+<Versus
+  items={[
+    { name: 'Batch processing', icon: '📦', pros: ['Process a large, <b>bounded</b> dataset all at once (e.g. yesterday’s logs)', 'High throughput, simple to reason about, easy to re-run', 'Cheap: run on spare capacity at night'], cons: ['Results are hours old', 'Not for anything that must react now'], use: 'Daily reports, billing, ML training data, search index rebuilds, recommendations computed nightly. Tools: Spark, Hadoop MapReduce, dbt + data warehouse.' },
+    { name: 'Stream processing', icon: '🌊', pros: ['Process an <b>unbounded</b> flow of events continuously, as they arrive', 'Results in seconds or less', 'Natural fit for event-driven systems'], cons: ['Harder: late/out-of-order events, state, exactly-once', 'Must run 24/7'], use: 'Fraud detection, live counters & dashboards, alerting, trending topics, real-time recommendations. Tools: Kafka Streams, Apache Flink, Spark Structured Streaming.' },
+  ]}
+/>
+
+## MapReduce: the idea behind batch processing
+
+Google's <Term k="mapreduce">MapReduce</Term> (2004) showed how to process petabytes on thousands of cheap machines. The idea is still the foundation of Spark and friends:
+
+<MapReduceSim />
+
+- **Map:** run on each chunk in parallel, where the data lives; emit key/value pairs.
+- **Shuffle:** group all values for a key on one machine.
+- **Reduce:** combine each key's values.
+- If a machine dies, just re-run its piece. The framework handles distribution and failures.
+
+Modern **Spark** keeps intermediate data in memory and offers SQL/DataFrames, so it's much faster and easier than classic Hadoop MapReduce, but the mental model is the same.
+
+## Stream processing concepts
+
+<Term k="stream-processing">Stream processing</Term> introduces new ideas:
+
+- **Windows:** you can't "count all views" of an infinite stream, so you count **per window**: tumbling (every 1 minute), sliding (last 5 min, updated every 10 s), session windows (activity bursts per user).
+- **Event time vs processing time:** a phone offline for 10 minutes sends old events late. Do you count them in the window when they *happened* (event time, usually right) or when they *arrived*?
+- **Watermarks:** "we're fairly sure all events up to 10:05 have arrived", so the 10:00–10:05 window can be finalized.
+- **State:** counts, aggregates and joins are kept in fault-tolerant state stores, checkpointed so a crash doesn't lose them.
+- **Exactly-once results:** checkpointing + idempotent/transactional sinks avoid double counting.
+
+## Lambda vs Kappa architecture
+
+<ArchFlow
+  title="Lambda architecture: batch + speed layers"
+  height={330}
+  nodes={[
+    { id: 'src', label: 'Events', sub: 'views, clicks', kind: 'client', icon: '📈', x: 90, y: 165 },
+    { id: 'k', label: 'Kafka', kind: 'queue', x: 270, y: 165 },
+    { id: 'lake', label: 'Data lake', sub: 'S3: raw events', kind: 'storage', x: 470, y: 70 },
+    { id: 'batch', label: 'Batch job', sub: 'Spark, nightly', kind: 'worker', x: 690, y: 70 },
+    { id: 'stream', label: 'Stream job', sub: 'Flink, seconds', kind: 'worker', x: 470, y: 260 },
+    { id: 'serve', label: 'Serving DB', sub: 'merged view', kind: 'db', x: 820, y: 180 },
+  ]}
+  edges={[
+    { from: 'src', to: 'k' },
+    { from: 'k', to: 'lake' },
+    { from: 'lake', to: 'batch' },
+    { from: 'k', to: 'stream' },
+    { from: 'batch', to: 'serve', label: 'accurate, late' },
+    { from: 'stream', to: 'serve', label: 'fast, approximate' },
+  ]}
+  steps={[
+    { title: 'All events land in Kafka', text: 'Every view and click is an event in Kafka.', add: ['src', 'k'], flow: ['src>k'] },
+    { title: 'Speed layer: real-time', text: 'A stream job (Flink) updates live counters within seconds. Fast, maybe slightly off (late events, approximations).', add: ['stream', 'serve'], flow: ['k>stream', 'stream>serve'] },
+    { title: 'Batch layer: correct, later', text: 'Raw events are also archived to a data lake. A nightly batch job recomputes exact results from the complete data and overwrites the approximate ones. This is how YouTube can show a live count and then “adjust” it later.', add: ['lake', 'batch'], flow: ['k>lake', 'lake>batch', 'batch>serve'] },
+  ]}
+/>
+
+- **Lambda architecture:** batch layer (correct) + speed layer (fast), merged at query time. Robust, but you maintain **two codebases** for the same logic.
+- **Kappa architecture:** **only streaming**. To recompute, replay the Kafka log through a new version of the stream job. One codebase; relies on long log retention and a capable stream processor.
+
+<Callout type="interview">
+Questions like "top K trending hashtags", "ad click aggregation", "YouTube view counts" or "real-time leaderboard of most played songs" are stream processing problems. Say: "Events go to **Kafka**; a **Flink** job aggregates counts in **1-minute tumbling windows by event time**, writing results to Redis/OLAP for serving; raw events are also archived to S3 for **batch reprocessing** and exact billing."
+</Callout>
+
+<Takeaways>
+- **Batch** = bounded data, high throughput, results later (Spark, MapReduce, warehouses).
+- **Stream** = unbounded events, results in seconds (Kafka Streams, Flink).
+- MapReduce: **map → shuffle → reduce**, run in parallel where data lives.
+- Streams need **windows, event time, watermarks, state and checkpoints**.
+- **Lambda** = batch + speed layers; **Kappa** = streaming only with replay.
+</Takeaways>
+
+<Quiz
+  id="batch-stream"
+  questions={[
+    { q: 'Monthly creator payouts computed from all of last month’s views. Batch or stream?', options: ['Stream', 'Batch', 'Neither', 'WebSocket'], answer: 1, explain: 'A bounded dataset, accuracy matters more than speed, run once per period: classic batch.' },
+    { q: 'Detecting credit card fraud while the transaction is happening. Batch or stream?', options: ['Batch, nightly', 'Stream, in real time', 'Manual review', 'Weekly report'], answer: 1, explain: 'You need to react within seconds or less.' },
+    { q: 'In MapReduce word count, what happens in the shuffle step?', options: ['Words are counted', 'All (word, 1) pairs for the same word are sent to the same reducer', 'Files are split', 'Results are written to disk'], answer: 1, explain: 'Shuffle groups values by key across machines so each reducer sees all values for its keys.' },
+    { q: 'Why do stream processors care about “event time”?', options: ['To encrypt events', 'Events can arrive late or out of order; counting by when they happened gives correct windows', 'It’s faster', 'Kafka requires it'], answer: 1, explain: 'Processing time would put a late event in the wrong window.' },
+    { q: 'What is the main downside of the Lambda architecture?', options: ['It’s not fault-tolerant', 'You maintain the same logic twice (batch + streaming)', 'It can’t handle big data', 'It needs GraphQL'], answer: 1, explain: 'Two codebases must stay in sync. Kappa avoids this with streaming + replay.' },
+  ]}
+/>

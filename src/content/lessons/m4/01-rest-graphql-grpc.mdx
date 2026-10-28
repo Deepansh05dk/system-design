@@ -1,0 +1,105 @@
+---
+title: REST vs GraphQL vs gRPC
+slug: rest-graphql-grpc
+description: Three ways for programs to talk. What each one is good at, and when to pick which, from a frontend developer's point of view.
+module: m4
+order: 1
+minutes: 14
+---
+
+<Callout type="problem">
+Your mobile profile screen needs a user's name, avatar, follower count and 3 latest post titles. With your REST API, that's 3 requests over a slow 4G connection, downloading ~6 KB when the screen uses ~0.5 KB. Meanwhile, your backend services call each other millions of times a second with JSON, wasting CPU on parsing. **Is there a better way to design these APIs?**
+</Callout>
+
+An <Term k="api">API</Term> is a contract between programs. The three most common styles:
+
+## REST
+
+<Term k="rest">REST</Term> models everything as **resources** with URLs, and uses **HTTP methods** for actions:
+
+```http
+GET    /users/7              → read user 7
+GET    /users/7/posts?limit=3 → user 7's posts
+POST   /users/7/posts        → create a post
+PATCH  /posts/42             → update part of post 42
+DELETE /posts/42             → delete post 42
+```
+
+- ✅ Simple, universal, works with every tool and language.
+- ✅ **HTTP caching** works naturally (GET + Cache-Control + CDN).
+- ✅ Easy to debug with a browser or curl.
+- ❌ **Over-fetching** (getting fields you don't need) and **under-fetching** (needing several requests for one screen).
+- ❌ Endpoints multiply as screens need different shapes.
+
+## GraphQL
+
+<Term k="graphql">GraphQL</Term> exposes **one endpoint** and a typed **schema**. The client sends a query describing exactly the shape it wants:
+
+```graphql
+query {
+  user(id: 7) {
+    name
+    avatarUrl
+    followersCount
+    posts(last: 3) { title }
+  }
+}
+```
+
+- ✅ **Exactly the data needed**, in **one request**. Great for mobile and complex UIs.
+- ✅ Strongly typed schema; great tooling (codegen, autocomplete).
+- ✅ Frontend teams can evolve screens without new backend endpoints.
+- ❌ **Caching is harder** (usually POST to one URL, so no simple HTTP/CDN caching; clients like Apollo cache normalized objects instead).
+- ❌ Easy to write expensive queries (deep nesting) → need query cost limits.
+- ❌ The **N+1 problem** on the server: resolving 50 posts' authors one by one. Fixed with batching (DataLoader).
+
+## gRPC
+
+<Term k="grpc">gRPC</Term> is a **remote procedure call** framework. You define services and messages in a `.proto` file, and code is generated for both sides. It runs over **HTTP/2** with **binary Protocol Buffers**.
+
+- ✅ **Fast and compact:** binary encoding, much smaller and faster to parse than JSON.
+- ✅ **Strong contracts** with generated clients in many languages.
+- ✅ **Streaming** in both directions (built on HTTP/2 streams).
+- ❌ Not human-readable; harder to debug.
+- ❌ Browsers can't speak it directly (needs gRPC-Web + a proxy).
+
+## Compare them on one screen
+
+<ApiStyleSim />
+
+## When to use which
+
+| | REST | GraphQL | gRPC |
+|---|---|---|---|
+| Best for | Public APIs, simple CRUD, cacheable reads | Client-facing APIs with varied, nested UI needs | Service-to-service calls inside your backend |
+| Format | JSON (text) | JSON (text) | Protobuf (binary) |
+| Transport | HTTP/1.1 or 2 | HTTP (usually POST) | HTTP/2 |
+| Caching | ✅ HTTP/CDN | Client-side, harder at CDN | Custom |
+| Streaming | Via SSE/WebSocket | Subscriptions | ✅ Built-in |
+
+A very common real architecture: **GraphQL (or REST) at the edge for clients → gRPC between internal services.**
+
+<Callout type="frontend">
+You probably feel GraphQL's benefits from the client side (one query per screen, typed hooks with codegen). In design interviews, show you also know the **server-side costs**: N+1 queries (fix with DataLoader batching), query complexity limits, and harder HTTP caching. Persisted queries (a hash instead of the full query text, sent as GET) bring back CDN caching.
+</Callout>
+
+<Callout type="interview">
+In most system design interviews, a simple **REST API** is the expected default: write 3–5 endpoints like `POST /urls`, `GET /{shortCode}`. Mention GraphQL if the problem is about flexible client screens, and **gRPC** for internal service-to-service calls where performance matters. Don't spend long on this choice unless asked.
+</Callout>
+
+<Takeaways>
+- **REST:** resources + HTTP verbs; simple, cacheable, universal. Risk of over/under-fetching.
+- **GraphQL:** one endpoint, client picks fields; great for complex UIs; harder caching, N+1 risk.
+- **gRPC:** binary, fast, typed, streaming; best **between services**.
+- Common combo: **REST/GraphQL for clients, gRPC inside**.
+</Takeaways>
+
+<Quiz
+  id="api-styles"
+  questions={[
+    { q: 'A mobile screen needs data from 3 REST endpoints and uses only a few fields from each. What problems is it facing?', options: ['Caching and security', 'Under-fetching (many requests) and over-fetching (too many fields)', 'Binary encoding', 'Rate limiting'], answer: 1, explain: 'This is exactly the problem GraphQL was designed to solve.' },
+    { q: 'Which is the best fit for high-volume calls between internal backend services?', options: ['REST with XML', 'gRPC', 'GraphQL subscriptions', 'Long polling'], answer: 1, explain: 'gRPC is binary, typed and fast over HTTP/2, ideal for service-to-service traffic.' },
+    { q: 'Why is HTTP/CDN caching harder with GraphQL?', options: ['GraphQL responses are binary', 'Queries are usually POSTed to a single URL, so URL-based caches can’t tell them apart', 'GraphQL forbids caching', 'It uses UDP'], answer: 1, explain: 'HTTP caches key on method + URL. Persisted queries via GET can help.' },
+    { q: 'What is the GraphQL N+1 problem?', options: ['A query returns N+1 fields', 'Resolving a list of N items triggers N extra database calls for a related field', 'Too many endpoints', 'Schema versioning'], answer: 1, explain: 'E.g. 1 query for posts + 1 query per post for its author. DataLoader batches them.' },
+  ]}
+/>

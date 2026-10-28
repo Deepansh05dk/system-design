@@ -1,0 +1,98 @@
+---
+title: "Event-Driven Architecture: Events, CQRS & Event Sourcing"
+slug: event-driven-architecture
+description: Systems that react to things that happened. Events vs commands, CQRS read models, and storing history as an append-only log.
+module: m4
+order: 6
+minutes: 15
+---
+
+<Callout type="problem">
+When an order is placed, 8 things must happen: charge payment, reserve stock, email the customer, notify the warehouse, update analytics, award loyalty points, update search, alert fraud detection. If the Order service calls all 8 directly, it must know about all of them, wait for all of them, and fail if any one fails. Next month, marketing wants a 9th. **Can the order service just announce what happened and let others react?**
+</Callout>
+
+## Events vs commands
+
+- A **command** asks someone to do something: `ChargeCard`, `SendEmail`. It's directed at one receiver and may be rejected.
+- An **event** states a fact that already happened: `OrderPlaced`, `PaymentFailed`. Past tense. The publisher doesn't know or care who listens.
+
+In an **event-driven architecture**, services publish events to a broker (Kafka, Pub/Sub, EventBridge), and any number of other services subscribe:
+
+<ArchFlow
+  title="One event, many independent reactions"
+  height={360}
+  nodes={[
+    { id: 'o', label: 'Order service', kind: 'service', x: 110, y: 180 },
+    { id: 'k', label: 'Event bus', sub: 'topic: orders', kind: 'queue', icon: '📢', x: 360, y: 180 },
+    { id: 'pay', label: 'Payments', kind: 'service', x: 640, y: 40 },
+    { id: 'inv', label: 'Inventory', kind: 'service', x: 640, y: 110 },
+    { id: 'mail', label: 'Email', kind: 'service', x: 640, y: 180 },
+    { id: 'ana', label: 'Analytics', kind: 'service', x: 640, y: 250 },
+    { id: 'loy', label: 'Loyalty points', sub: 'added next month', kind: 'service', x: 640, y: 320 },
+  ]}
+  edges={[
+    { from: 'o', to: 'k', label: 'OrderPlaced' },
+    { from: 'k', to: 'pay' },
+    { from: 'k', to: 'inv' },
+    { from: 'k', to: 'mail' },
+    { from: 'k', to: 'ana' },
+    { from: 'k', to: 'loy', dashed: true },
+  ]}
+  steps={[
+    { title: 'Publish a fact', text: 'The order service saves the order and publishes <code>OrderPlaced</code> (via the outbox pattern). Then it’s done: it responds to the user quickly.', add: ['o', 'k'], flow: ['o>k'] },
+    { title: 'Subscribers react independently', text: 'Payments, inventory, email and analytics each consume the event at their own pace. If email is down, the others are unaffected; email catches up later from the log.', add: ['pay', 'inv', 'mail', 'ana'], flow: ['k>pay', 'k>inv', 'k>mail', 'k>ana'] },
+    { title: 'New features without touching the publisher', text: 'Loyalty points? Just add a new subscriber. With Kafka it can even replay old events to award points retroactively. The order service didn’t change at all.', add: ['loy'], flow: ['k>loy'] },
+  ]}
+/>
+
+✅ Loose coupling, easy to extend, resilient to one consumer being down, natural audit trail.
+❌ Harder to follow "what happens when an order is placed" (no single place shows the flow), eventual consistency, need idempotent consumers, event schema evolution must be managed (schema registry).
+
+## CQRS: separate models for writing and reading
+
+<Term k="cqrs">CQRS</Term> (Command Query Responsibility Segregation) says: the model that's best for **writing** (normalized, validated, transactional) is rarely the best for **reading** (denormalized, pre-joined, search-friendly). So use **two**:
+
+- **Write side:** commands go to the main database (e.g. PostgreSQL), which enforces rules.
+- **Read side:** one or more **read models** (Elasticsearch for search, Redis for counters, a denormalized table for a dashboard) updated from **events**.
+
+You've already seen this idea: the search index fed by CDC, the precomputed news feed, counters in Redis. CQRS just names it. The cost: read models are **eventually consistent** with the write side.
+
+## Event sourcing: store the history, not just the state
+
+Normally a database stores the **current state** (balance = ₹4,550) and overwrites it. <Term k="event-sourcing">Event sourcing</Term> stores **every change as an immutable event**, and the current state is computed by **replaying** them:
+
+<EventSourcingSim />
+
+✅ Complete **audit trail** (banks, accounting, legal requirements). ✅ **Time travel**: what was the state last Tuesday? ✅ Build **new projections** later from the full history. ✅ Debug by replaying exactly what happened.
+
+❌ More complex to build and query. ❌ Replaying millions of events is slow, so you keep **snapshots** (state at event #1,000,000) and replay from there. ❌ Events are forever: changing their shape needs versioning ("upcasting"). ❌ Fixing bad data means adding **correcting events**, not editing.
+
+<Callout type="analogy">
+A bank statement is event sourcing: it lists every transaction, and your balance is the sum. Git is event sourcing for code: commits are events, and your working tree is the replayed state. You can check out any past version.
+</Callout>
+
+<Callout type="why" title="Do I need event sourcing?">
+Usually not. Use **events between services** (very common) and **CQRS read models** (common) freely. Use full **event sourcing** only where history itself is valuable: ledgers, payments, orders with complex lifecycles, compliance-heavy domains. It's a strong tool with a real complexity cost.
+</Callout>
+
+<Callout type="interview">
+Good phrases: "Services communicate through **domain events** on Kafka, so adding consumers doesn't touch the producer." "We use **CQRS**: writes go to Postgres; reads for search and feeds come from **read models** updated by events, eventually consistent within seconds." "The **payment ledger is event-sourced**, giving a full audit trail."
+</Callout>
+
+<Takeaways>
+- **Commands** ask; **events** announce facts (past tense) to any subscribers.
+- **Event-driven** = loose coupling, easy extension, resilience; costs: eventual consistency, harder tracing.
+- **CQRS** = separate write model and read models, synced by events.
+- **Event sourcing** = state is derived from an append-only event log: audit + time travel; use selectively.
+</Takeaways>
+
+<Quiz
+  id="event-driven"
+  questions={[
+    { q: 'Which is an event (not a command)?', options: ['SendWelcomeEmail', 'ChargeCard', 'OrderPlaced', 'ReserveStock'], answer: 2, explain: 'Events are past-tense facts. The others are instructions to do something.' },
+    { q: 'What is CQRS?', options: ['A query language', 'Using separate models/stores for writes and reads', 'A type of cache', 'A consensus protocol'], answer: 1, explain: 'Commands update the write model; queries read from optimized read models.' },
+    { q: 'In event sourcing, how do you get the current account balance?', options: ['Read the balance column', 'Replay (or read a snapshot + recent) events and compute it', 'Ask the cache', 'It’s impossible'], answer: 1, explain: 'State is a projection of the event log. Snapshots speed it up.' },
+    { q: 'What is a big advantage of event sourcing?', options: ['Less storage', 'Complete history: audit trail and the ability to rebuild state at any point in time', 'No need for a database', 'Strong consistency everywhere'], answer: 1, explain: 'Nothing is overwritten, so you can always answer “what happened and when”.' },
+    { q: 'Marketing wants to award loyalty points on every order. With an event-driven design you…', options: ['Change the order service code', 'Add a new subscriber to OrderPlaced', 'Add a cron job that scans the DB', 'Rewrite the payment service'], answer: 1, explain: 'New consumers can subscribe without changing the publisher.' },
+  ]}
+/>

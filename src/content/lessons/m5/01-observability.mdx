@@ -1,0 +1,84 @@
+---
+title: "Observability: Logs, Metrics & Traces"
+slug: observability
+description: You can't fix what you can't see. The three pillars of observability, what to measure, and how to alert without waking people up for nothing.
+module: m5
+order: 1
+minutes: 13
+---
+
+<Callout type="problem">
+It's 2 AM. Users say "checkout is slow". Your system has 40 services, 600 servers and 3 databases. Which one is the problem? Is it slow for everyone or only users in one region? Since when? Did the 6 PM deploy cause it? **Without good observability, you're debugging blindfolded.**
+</Callout>
+
+<Term k="observability">Observability</Term> is how well you can understand what's happening **inside** a system by looking at what it outputs. It rests on three pillars:
+
+## 1. Logs: what happened
+
+Timestamped records of events: "user 7 logged in", "payment failed: card declined", stack traces.
+
+```json
+{"ts":"2026-10-28T02:03:11Z","level":"error","service":"payment","trace_id":"9f8a…",
+ "user_id":7,"order_id":991,"msg":"provider timeout","latency_ms":3000}
+```
+
+- Use **structured logs** (JSON with fields), not free text, so you can search "all errors for order 991".
+- Ship them to a central system (ELK/OpenSearch, Loki, Datadog, CloudWatch). You can't SSH into 600 servers.
+- Include a **request/trace ID** in every log line, so you can follow one request across services.
+- Watch **volume and cost**: log levels, sampling of noisy debug logs, retention limits. Never log passwords, tokens or full card numbers.
+
+## 2. Metrics: how much, how fast, how often
+
+Numbers aggregated over time: requests/sec, error rate, p99 latency, CPU, queue depth, cache hit rate. Cheap to store, great for **dashboards** and **alerts**. Tools: Prometheus + Grafana, Datadog, CloudWatch.
+
+Two famous checklists of what to measure:
+
+| Method | For | Measure |
+|---|---|---|
+| **RED** | Every service/endpoint | **R**ate (req/s), **E**rrors (failed req/s), **D**uration (latency percentiles) |
+| **USE** | Every resource (CPU, disk, pool) | **U**tilization, **S**aturation (queueing), **E**rrors |
+| **Golden signals** (Google SRE) | User-facing systems | Latency, traffic, errors, saturation |
+
+## 3. Traces: where the time went
+
+A **distributed trace** follows one request through every service it touches. Each operation is a **span** with a start time and duration; spans nest to show which call made which. A trace ID is passed along in headers (W3C `traceparent`). Tools: OpenTelemetry (the standard for instrumenting), Jaeger, Tempo, Datadog APM, Honeycomb.
+
+<TraceWaterfall />
+
+Traces answer the question metrics can't: **"this request was slow, but which part?"**
+
+<Callout type="frontend">
+Chrome DevTools' Performance tab and the Network waterfall are traces for the browser. **Real User Monitoring (RUM)** tools (and Core Web Vitals reporting) send frontend timings to the same systems, and OpenTelemetry can connect a slow button click in the browser to the slow database query behind it.
+</Callout>
+
+## Alerting that doesn't burn people out
+
+- Alert on **symptoms users feel** (error rate up, p99 latency up, checkout success down), not on every cause (CPU at 80% on one box might be fine).
+- Base alerts on **SLOs** (next lesson): "we're burning our monthly error budget too fast".
+- Every alert should be **actionable** and link to a **runbook** (what to check, how to mitigate).
+- Too many noisy alerts → people ignore them (**alert fatigue**) → the real one gets missed.
+
+## Health dashboards
+
+A good service dashboard shows, at a glance: traffic, error rate, latency (p50/p95/p99), saturation (CPU, memory, connection pools, queue lag) and recent **deploys** marked on the graphs, because "what changed?" is always the first question.
+
+<Callout type="interview">
+Spend 30 seconds on this near the end of a design: "Each service emits **RED metrics** to Prometheus/Grafana, **structured logs** with trace IDs to a central store, and **OpenTelemetry traces**. We alert on SLO burn rate for user-facing symptoms like checkout error rate and p99 latency." Interviewers notice when operability is part of your thinking.
+</Callout>
+
+<Takeaways>
+- **Logs** = what happened (structured, centralized, with trace IDs).
+- **Metrics** = numbers over time (RED for services, USE for resources); cheap, good for alerts.
+- **Traces** = one request's path across services; find where the time went.
+- Alert on **user-facing symptoms** tied to SLOs; make alerts actionable; avoid alert fatigue.
+</Takeaways>
+
+<Quiz
+  id="observability"
+  questions={[
+    { q: 'A request is slow and passes through 8 services. Which tool shows which service took the time?', options: ['Logs', 'Metrics dashboards', 'Distributed tracing', 'DNS'], answer: 2, explain: 'Traces show the spans of one request across services with their durations.' },
+    { q: 'What does RED stand for?', options: ['Read, Edit, Delete', 'Rate, Errors, Duration', 'Redundancy, Elasticity, Durability', 'Requests, Events, Data'], answer: 1, explain: 'The three key metrics for any request-driven service.' },
+    { q: 'Why include a trace/request ID in every log line?', options: ['For encryption', 'To find all log lines for one request across many services', 'To reduce log size', 'It’s required by JSON'], answer: 1, explain: 'It stitches together a request’s story across the whole system.' },
+    { q: 'Which alert is the most useful to page someone at night?', options: ['CPU of one server above 70%', 'Checkout error rate above SLO threshold for 5 minutes', 'Disk 40% full', 'A debug log line appeared'], answer: 1, explain: 'Alert on symptoms users actually feel, tied to objectives.' },
+  ]}
+/>

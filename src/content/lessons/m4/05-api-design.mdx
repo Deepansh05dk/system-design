@@ -1,0 +1,97 @@
+---
+title: API Design Essentials
+slug: api-design-essentials
+description: Pagination that doesn't break, versioning, idempotent writes, webhooks, and the small details that make an API pleasant and safe at scale.
+module: m4
+order: 5
+minutes: 14
+---
+
+<Callout type="problem">
+Your feed API returns page 2 using `?page=2`. Meanwhile 10 new posts arrived, so page 2 now shows posts the user already saw on page 1. Your mobile app v1.0 is still used by 30% of users, and you need to rename a field. A partner wants to know the instant an order ships, and is polling you 100 times a second. **APIs live a long time. Small design choices decide whether they age well.**
+</Callout>
+
+## 1. Pagination
+
+Never return unbounded lists. Two main styles:
+
+<PaginationSim />
+
+<Versus
+  items={[
+    { name: 'Offset / page', icon: '🔢', pros: ['<code>?limit=20&offset=40</code> or <code>?page=3</code>', 'Jump to any page; easy “page 3 of 10” UI'], cons: ['Duplicates / gaps when items are inserted or deleted', 'Large offsets are slow: the DB still walks past 100,000 rows to skip them'], use: 'Admin tables, search results with page numbers, small datasets.' },
+    { name: 'Cursor / keyset', icon: '👉', pros: ['<code>?limit=20&cursor=eyJpZCI6...</code> → <code>WHERE id &lt; :last ORDER BY id DESC</code>', 'Stable with inserts; uses the index → fast at any depth'], cons: ['No jumping to “page 50”', 'Sort key must be unique & indexed (e.g. created_at + id)'], use: 'Infinite scroll, feeds, chat history, any large or fast-changing list. <b>The default for feeds.</b>' },
+  ]}
+/>
+
+Return the cursor in the response, e.g. `{ "items": [...], "nextCursor": "eyJpZCI6OTkxfQ" }`. Make cursors **opaque** (base64-encoded) so clients don't depend on their internals.
+
+<Callout type="frontend">
+This is what `useInfiniteQuery`'s `getNextPageParam` consumes. If you've seen duplicate items in an infinite list after new posts arrived, the backend was using offset pagination.
+</Callout>
+
+## 2. Versioning
+
+You can't force every mobile user to update. Breaking changes need a new version:
+- **URL versioning:** `/v1/orders`, `/v2/orders`. Most common, very explicit.
+- **Header versioning:** `Accept: application/vnd.myapi.v2+json` or `API-Version: 2024-10-01` (Stripe uses dated versions).
+
+Better still: **avoid breaking changes**. Adding fields is safe; removing/renaming fields or changing meanings is breaking. Deprecate with warnings and timelines.
+
+## 3. Safe writes
+
+- **Idempotency keys** for POSTs that create things or move money (Module 3).
+- **Optimistic concurrency:** return an `ETag`/version with reads; require `If-Match` on updates; reply **409/412** if someone else changed it first.
+- **Validation** with clear errors: `400` with a machine-readable body: `{ "error": "invalid_email", "field": "email", "message": "..." }`.
+
+## 4. Webhooks: don't make partners poll
+
+A <Term k="webhook">webhook</Term> is a reverse API: **you** call the **partner's** URL when an event happens (payment succeeded, order shipped).
+
+<SequenceFlow
+  title="Delivering a webhook reliably"
+  actors={[
+    { id: 'svc', label: 'Your service', icon: '🖥️' },
+    { id: 'q', label: 'Webhook queue', icon: '📬' },
+    { id: 'p', label: 'Partner endpoint', icon: '🏢' },
+  ]}
+  messages={[
+    { from: 'svc', to: 'q', label: 'event: order.shipped (id evt_77)', note: 'The event is written to a queue (via the outbox pattern) so it isn’t lost if the partner is down.' },
+    { from: 'q', to: 'p', label: 'POST /hooks  X-Signature: hmac…', note: 'A worker POSTs the event with an <b>HMAC signature</b> so the partner can verify it really came from you, plus a timestamp to prevent replays.' },
+    { from: 'p', to: 'q', label: '500 / timeout', dashed: true, bad: true, note: 'Partner is down. The worker retries with <b>exponential backoff</b> for hours/days, then gives up and alerts.' },
+    { from: 'q', to: 'p', label: 'retry: same event id evt_77', note: 'Retries mean duplicates are possible, so the partner must deduplicate by <b>event ID</b> (idempotent handling).' },
+    { from: 'p', to: 'q', label: '200 OK', dashed: true, note: 'Delivered. Good providers also offer a dashboard and an API to re-fetch missed events.' },
+  ]}
+/>
+
+## 5. The rest of the checklist
+
+- **Consistent naming:** plural nouns (`/orders`), kebab or snake case, consistent JSON field style.
+- **Filtering & sorting:** `?status=shipped&sort=-created_at`.
+- **Partial responses:** `?fields=id,name` to reduce payloads.
+- **Rate limit headers:** `X-RateLimit-Remaining`, `Retry-After`.
+- **Long-running work:** return `202 Accepted` + a job URL to poll (or a webhook), instead of holding the request for minutes.
+- **Batch endpoints** to avoid chatty APIs over slow networks.
+
+<Callout type="interview">
+When you write your API in an interview, include: **cursor pagination** on list endpoints, an **idempotency key** on creation/payment endpoints, and the right **status codes** (201, 202, 409, 429). Example: `GET /v1/users/{id}/feed?cursor=…&limit=20` → `{ items, nextCursor }`. Small details, strong signal.
+</Callout>
+
+<Takeaways>
+- Use **cursor pagination** for feeds and large lists; offset only for small/jumpable lists.
+- **Version** explicitly and prefer **non-breaking** changes.
+- Protect writes with **idempotency keys** and **optimistic concurrency** (ETag/If-Match).
+- **Webhooks**: queue + signed POST + retries with backoff + event IDs for dedup.
+- Use **202 + job status** for long work; good errors; rate-limit headers.
+</Takeaways>
+
+<Quiz
+  id="api-design"
+  questions={[
+    { q: 'An infinite-scroll feed shows duplicate posts after new posts are published. Best fix?', options: ['Bigger page size', 'Switch from offset to cursor-based pagination', 'Add caching', 'Use GraphQL'], answer: 1, explain: 'Cursors continue “after item X”, unaffected by inserts at the top.' },
+    { q: 'Why are large OFFSET values slow in SQL?', options: ['They can’t use LIMIT', 'The DB must still read and skip all the earlier rows', 'Offsets aren’t indexed', 'They lock the table'], answer: 1, explain: 'OFFSET 100000 makes the DB walk 100,000 rows. Keyset (WHERE id < x) jumps via the index.' },
+    { q: 'A partner receives the same webhook event twice. What should they do?', options: ['Process it twice', 'Deduplicate using the event ID', 'Return 500', 'Ignore all webhooks'], answer: 1, explain: 'Delivery is at-least-once, so handlers must be idempotent.' },
+    { q: 'A report takes 3 minutes to generate. What should the API return immediately?', options: ['200 after 3 minutes', '202 Accepted with a job/status URL (or a webhook later)', '500', '301'], answer: 1, explain: 'Don’t hold requests for minutes; accept the job and let the client check status.' },
+    { q: 'Which change is NON-breaking for existing clients?', options: ['Renaming a field', 'Removing a field', 'Adding a new optional field', 'Changing a field from number to string'], answer: 2, explain: 'Well-behaved clients ignore unknown fields, so additions are safe.' },
+  ]}
+/>

@@ -1,0 +1,103 @@
+---
+title: Authentication & Authorization
+slug: authentication-and-authorization
+description: Who are you, and what are you allowed to do? Sessions vs JWTs, OAuth 2.0 / “Login with Google”, and how auth works across many services.
+module: m4
+order: 4
+minutes: 16
+---
+
+<Callout type="problem">
+HTTP is stateless: every request is a stranger. Yet after you log in once, Amazon knows it's you on every page, across thousands of servers and dozens of services. And when you click "Login with Google", a site you've never given a password to somehow gets your name and email. **How does all that work, safely?**
+</Callout>
+
+## Two different questions
+
+- **Authentication (AuthN):** *Who are you?* → login, passwords, OTPs, passkeys, "Login with Google". Failure → **401 Unauthorized**.
+- **Authorization (AuthZ):** *What are you allowed to do?* → roles and permissions ("admins can delete posts", "you can only edit your own orders"). Failure → **403 Forbidden**.
+
+## After login: sessions vs tokens
+
+Once a user proves who they are, the server gives them something to send with every later request.
+
+<Versus
+  items={[
+    { name: 'Server-side sessions', icon: '🎟️', pros: ['Server stores session data (Redis/DB); client gets a random <b>session ID</b> in a cookie', 'Instant logout/revocation: delete the session', 'Small cookie, no sensitive data on the client'], cons: ['Every request needs a session lookup (fast with Redis)', 'Session store must be shared by all servers'], use: 'Classic web apps, especially same-domain browser apps. Simple and safe default.' },
+    { name: 'Tokens (JWT)', icon: '🪪', pros: ['Self-contained: the token carries user ID, roles, expiry, <b>signed</b> by the server', 'Any service can verify it locally with the key: no lookup', 'Works well across services, domains and mobile apps'], cons: ['Hard to revoke before expiry → keep them short-lived (5–15 min) + refresh tokens', 'Larger than a session ID; payload is readable (not secret)'], use: 'APIs, mobile apps, microservices, cross-domain/SSO. Usually short-lived access token + long-lived refresh token.' },
+  ]}
+/>
+
+### What's inside a JWT?
+
+A <Term k="jwt">JWT</Term> is three base64url parts: `header.payload.signature`. Try tampering with one:
+
+<JwtDecoder />
+
+### Access token + refresh token
+
+The usual pattern for APIs and mobile apps:
+1. On login, the server returns a **short-lived access token** (JWT, ~15 min) and a **long-lived refresh token** (days/weeks, stored server-side so it can be revoked).
+2. Every API call sends `Authorization: Bearer <access token>`. Services verify the signature locally: fast, no database.
+3. When the access token expires, the client uses the refresh token to get a new one. **Logout / ban** = revoke the refresh token; the access token dies within minutes.
+
+<Callout type="frontend">
+**Where to store tokens in the browser?** `localStorage` is readable by any JavaScript on the page, so an XSS bug can steal tokens. An **`HttpOnly`, `Secure`, `SameSite` cookie** can't be read by JS, which is why many teams keep the refresh token (or the session) in such a cookie and the short-lived access token in memory. Cookies then need **CSRF** protection (SameSite + CSRF tokens). You'll be asked this in frontend interviews!
+</Callout>
+
+## OAuth 2.0: “Login with Google”
+
+<Term k="oauth">OAuth 2.0</Term> lets an app access your data on another service **without seeing your password**. Combined with **OpenID Connect (OIDC)**, it's also how "Login with Google/GitHub/Apple" works. The most common flow is **Authorization Code + PKCE**:
+
+<SequenceFlow
+  title="Login with Google (Authorization Code flow + PKCE)"
+  actors={[
+    { id: 'u', label: 'Browser', icon: '👤' },
+    { id: 'app', label: 'YourApp server', icon: '🖥️' },
+    { id: 'g', label: 'Google (auth server)', icon: '🔐' },
+  ]}
+  messages={[
+    { from: 'u', to: 'app', label: 'click “Login with Google”', note: 'The user wants to log in to YourApp using their Google account.' },
+    { from: 'app', to: 'u', label: 'redirect to accounts.google.com?client_id…&scope=email&code_challenge…', dashed: true, note: 'YourApp redirects the browser to Google, saying who it is (client_id), what it wants (scope: email, profile), where to come back (redirect_uri) and a PKCE <code>code_challenge</code>.' },
+    { from: 'u', to: 'g', label: 'log in + “Allow YourApp to see your email?”', note: 'The password is typed <b>only on Google’s page</b>. YourApp never sees it. The user approves the requested permissions.' },
+    { from: 'g', to: 'u', label: 'redirect back with ?code=abc123', dashed: true, note: 'Google sends the browser back to YourApp with a short-lived, one-time <b>authorization code</b>.' },
+    { from: 'u', to: 'app', label: 'GET /callback?code=abc123' },
+    { from: 'app', to: 'g', label: 'exchange code + secret/verifier for tokens', note: 'YourApp’s <b>server</b> exchanges the code (plus its client secret and the PKCE verifier) for tokens, server-to-server. An attacker who stole the code from the URL can’t do this step.' },
+    { from: 'g', to: 'app', label: 'ID token (who) + access token', dashed: true, note: 'The <b>ID token</b> (a JWT, OpenID Connect) says who the user is. The <b>access token</b> lets YourApp call Google APIs within the approved scope.' },
+    { from: 'app', to: 'u', label: 'Set-Cookie: session=…  (logged in!)', dashed: true, note: 'YourApp creates its own session for the user. Done.' },
+  ]}
+/>
+
+## Auth across microservices
+
+- The **API gateway** validates the token once (signature, expiry) and passes the user ID/roles to services in trusted headers, or services verify the JWT themselves using the public key (JWKS).
+- Service-to-service calls use their own identity (**mTLS** or service tokens), so a compromised service can't impersonate users freely.
+- **Authorization** stays close to the data: the order service checks "does this order belong to this user?". The gateway can't know that.
+
+### Authorization models
+
+- **RBAC (role-based):** users have roles (admin, editor, viewer); roles have permissions. Simple, common.
+- **ABAC (attribute-based):** rules on attributes ("managers can approve expenses < ₹50K in their own department").
+- **ReBAC (relationship-based):** permissions follow relationships ("you can edit docs shared with you"). Google Zanzibar, used by Google Drive; open-source: SpiceDB, OpenFGA.
+
+<Callout type="interview">
+Typical summary: "Users log in via our auth service (or OAuth/OIDC with Google). We issue a **short-lived JWT access token** and a **revocable refresh token** in an HttpOnly cookie. The **gateway verifies JWTs** and forwards the user ID; each service enforces **ownership/role checks** on its own data. Internal calls use **mTLS**." Mention **401 vs 403** correctly.
+</Callout>
+
+<Takeaways>
+- **AuthN** = who you are (401). **AuthZ** = what you can do (403).
+- **Sessions:** server-side state, easy revocation. **JWTs:** self-contained, verified locally, short-lived + refresh tokens.
+- JWT payloads are **readable**; the **signature** prevents tampering.
+- **OAuth 2.0 + OIDC (Authorization Code + PKCE)** powers “Login with Google” without sharing passwords.
+- In microservices: **verify at the gateway, authorize at the service, mTLS between services**.
+</Takeaways>
+
+<Quiz
+  id="auth"
+  questions={[
+    { q: 'A user edits their JWT payload to role: "admin". What happens on a correctly built server?', options: ['They become admin', 'The signature no longer matches, so the token is rejected', 'The server re-signs it', 'Nothing, roles are ignored'], answer: 1, explain: 'Without the server’s secret/private key, they can’t produce a valid signature for the changed payload.' },
+    { q: 'Why keep JWT access tokens short-lived?', options: ['They’re large', 'They can’t easily be revoked before expiry, so a short life limits the damage if stolen', 'Browsers delete them', 'For faster parsing'], answer: 1, explain: 'Short-lived access tokens + revocable refresh tokens balance speed and control.' },
+    { q: 'In “Login with Google”, who sees the user’s Google password?', options: ['YourApp’s server', 'YourApp’s frontend', 'Only Google', 'Both Google and YourApp'], answer: 2, explain: 'The user logs in on Google’s page. YourApp only receives a code, then tokens.' },
+    { q: 'Why is storing tokens in localStorage risky?', options: ['It’s too small', 'Any injected JavaScript (XSS) can read and steal them', 'It’s cleared on refresh', 'Servers can’t read it'], answer: 1, explain: 'HttpOnly cookies are not readable by JS, which reduces XSS token theft.' },
+    { q: 'Where should “can this user cancel order #991?” be checked?', options: ['Only in the frontend', 'In the order service, which owns the order data', 'Only at the CDN', 'In the DNS'], answer: 1, explain: 'Ownership checks need the data, so they belong in the service that owns it.' },
+  ]}
+/>

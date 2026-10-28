@@ -1,0 +1,90 @@
+---
+title: Requirements Gathering
+slug: requirements-gathering
+description: How to turn “Design Instagram” into a clear, agreed scope in five minutes. Functional vs non-functional requirements and the questions that matter.
+module: m6
+order: 2
+minutes: 11
+---
+
+<Callout type="problem">
+"Design Instagram" could mean photo upload, feed, stories, reels, DMs, search, ads, recommendations, comments, notifications, live video… That's years of work for thousands of engineers. In 45 minutes you can design maybe **three or four** of those well. **The first five minutes decide which ones.**
+</Callout>
+
+## Two kinds of requirements
+
+<Versus
+  items={[
+    { name: 'Functional', icon: '🧩', pros: ['<b>What</b> the system does', 'Features and user actions', 'E.g. “users can upload photos”, “users see a feed of people they follow”, “users can like posts”'], use: 'Pick 3–5 core ones. Explicitly list what’s out of scope.' },
+    { name: 'Non-functional', icon: '📏', pros: ['<b>How well</b> it does it', 'Scale, latency, availability, consistency, durability, security, cost', 'E.g. “feed loads in < 200 ms p99”, “99.99% available”, “photos are never lost”'], use: 'These drive the architecture. Turn adjectives (“fast”) into numbers.' },
+  ]}
+/>
+
+## Practice: which questions would you ask?
+
+<QuestionPicker />
+
+## A question checklist
+
+**Features (functional)**
+- Who are the users? What are the 3–5 most important actions?
+- What's explicitly **out of scope**? (Say it out loud.)
+- Any special behaviour? (Ranked or chronological feed? Edit/delete? Group chats? Custom aliases?)
+
+**Scale**
+- Daily active users? Peak vs average?
+- Read/write ratio? Average object size (text vs photos vs video)?
+- How much data, and for how long do we keep it?
+- Global or single region?
+
+**Quality (non-functional)**
+- Latency targets for the key operations?
+- Availability target? What can never go down?
+- Consistency: is it OK if a new post shows up a few seconds late? Is anything money/inventory-like?
+- Durability: can we ever lose data (messages, photos, payments)?
+- Any security, privacy or compliance needs?
+
+## Write it down: an example
+
+> **Design a URL shortener**
+>
+> **Functional**
+> 1. Given a long URL, return a short URL (optional custom alias).
+> 2. Visiting the short URL redirects to the long URL.
+> 3. Links can have an expiry date.
+> 4. *(Stretch)* Basic click analytics.
+> *Out of scope: user accounts UI, link editing, spam detection.*
+>
+> **Non-functional**
+> - 100M new URLs/month; read:write ≈ 100:1 → ~4K reads/sec avg.
+> - Redirect latency < 50 ms p99.
+> - Highly available (99.99%): a dead link breaks someone's website.
+> - Short codes must be unique and not guessable in sequence.
+> - Durable: links must never be lost.
+
+That box stays on the board for the whole interview. Before wrapping up, glance back and check: **did my design satisfy every line?**
+
+<Callout type="tip">
+If the interviewer says "you decide", **make reasonable assumptions and state them**: "I'll assume 100M DAU, a chronological feed, and that a few seconds of delay for new posts is fine." Clear assumptions beat endless questions.
+</Callout>
+
+<Callout type="mistake">
+Two opposite mistakes: (1) **no questions**, jumping straight to drawing; (2) **15 minutes of questions**, interrogating every detail. Aim for **3–5 minutes**, focused on the questions that change the design.
+</Callout>
+
+<Takeaways>
+- **Functional** = what it does (3–5 core features + explicit out-of-scope). **Non-functional** = how well (numbers!).
+- Ask about **features, scale, latency, availability, consistency, durability**.
+- Ask questions that **change the design**; skip implementation details.
+- Write requirements down and **check your design against them** at the end.
+</Takeaways>
+
+<Quiz
+  id="requirements"
+  questions={[
+    { q: 'Which is a non-functional requirement?', options: ['Users can follow other users', 'The feed loads in under 200 ms at p99', 'Users can like posts', 'Users can upload photos'], answer: 1, explain: 'It describes how well the system performs, not what it does.' },
+    { q: 'Which question changes the design the most for a feed?', options: ['What font does the app use?', 'Is the feed chronological or ranked, and can new posts appear a few seconds late?', 'What language is the backend in?', 'What IDE do engineers use?'], answer: 1, explain: 'Ranking and consistency expectations directly shape feed generation and caching.' },
+    { q: 'The interviewer says “you decide” about scale. Best response?', options: ['Refuse to continue', 'State reasonable assumptions clearly and continue', 'Pick the biggest numbers possible', 'Skip scale entirely'], answer: 1, explain: 'Explicit assumptions keep the discussion moving and show judgment.' },
+    { q: 'Why say what’s out of scope?', options: ['To sound confident', 'To agree on boundaries so you spend time on what matters', 'It’s required by law', 'To avoid estimation'], answer: 1, explain: 'It prevents the interviewer from expecting features you won’t design.' },
+  ]}
+/>

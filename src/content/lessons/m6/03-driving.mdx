@@ -1,0 +1,100 @@
+---
+title: Driving the Interview & Handling “What If?”
+slug: driving-the-interview
+description: How to communicate, choose deep dives, defend decisions, respond to pushback, and avoid the most common ways candidates lose points.
+module: m6
+order: 3
+minutes: 12
+---
+
+<Callout type="problem">
+You've drawn a reasonable design. Then the interviewer asks: "What happens if this cache goes down?" "Why not just use MongoDB?" "What if a celebrity with 50 million followers posts?" Some candidates freeze, some get defensive, some start redesigning everything. **How you handle these moments often matters more than the initial diagram.**
+</Callout>
+
+## Think out loud
+
+The interviewer can only score what they hear. Narrate your reasoning:
+- "I'm considering two options here…"
+- "The trade-off is X vs Y. Given our requirement of Z, I'll pick X."
+- "Let me check this against the requirements…"
+
+Check in every few minutes: "Does this direction make sense, or would you like me to go deeper somewhere?" Interviewers often drop **hints**. Treat them as gifts.
+
+## The trade-off sentence
+
+Use this shape for every important decision:
+
+> **"I'll use [choice] because [requirement/number]. The downside is [cost], which is acceptable because [reason]. If [condition changes], I'd switch to [alternative]."**
+
+Example: "I'll use **Cassandra** for messages **because** we have 1M writes/sec and always read by conversation in time order. The **downside** is no JOINs and eventual consistency, which is **acceptable because** messages are self-contained and a few hundred milliseconds of delay is fine. **If** we needed complex queries on messages, I'd add a search index fed by events."
+
+## Handling “What if X fails?”
+
+Have a mental checklist and walk through it calmly:
+
+| Component | Typical answer |
+|---|---|
+| App server dies | Stateless + LB health checks; auto-scaling replaces it |
+| Load balancer dies | Redundant pair / managed multi-AZ LB |
+| Cache dies | Cache-aside still works from DB (slower); replicated Redis; protect DB from the stampede |
+| Primary DB dies | Automatic failover to a replica; async lag may lose seconds of writes, sync standby avoids it |
+| Queue/broker dies | Replicated Kafka (replication factor 3); producers retry; consumers resume from committed offsets |
+| A dependency is slow | Timeouts, circuit breaker, graceful degradation |
+| A whole region dies | Multi-AZ by default; multi-region for critical paths; DNS failover |
+| Traffic spike 10× | Auto-scaling, queues to absorb bursts, rate limiting, caching, load shedding |
+
+## Handling pushback
+
+When the interviewer challenges a choice ("Why not use X?"):
+1. **Don't get defensive.** They may be testing whether you understand the trade-off, not saying you're wrong.
+2. **Acknowledge** the merit of the alternative: "X would give us …"
+3. **Compare** on the requirements: "…but we need Y, which X makes harder."
+4. **Be willing to change** if they reveal a requirement you missed: "Good point. If that's a requirement, X is the better fit. Let me adjust."
+
+Changing your mind for a good reason is a **positive** signal. Clinging to a bad choice is a negative one.
+
+## Choosing deep dives
+
+If the interviewer doesn't steer, pick the parts that are **unique and hard** for this problem, not generic ones:
+
+| Problem | Good deep dives |
+|---|---|
+| News feed | Fan-out on write vs read, celebrity problem, feed ranking & caching |
+| Chat | Real-time delivery across servers, message ordering, offline delivery, read receipts |
+| URL shortener | Short code generation (collisions), redirect latency, 301 vs 302 |
+| Uber | Location updates at scale, geospatial index, matching, consistency of trip state |
+| Ticket booking | Concurrency / double booking, seat holds with expiry, flash-sale load |
+| Payments | Idempotency, exactly-once effects, ledger, reconciliation |
+
+## The most common ways to lose points
+
+1. Jumping into the design without requirements.
+2. Over-engineering: Kafka + microservices + 5 databases for a simple problem.
+3. Naming technologies without explaining **why**.
+4. Ignoring the numbers you just estimated.
+5. Never mentioning failures, consistency or bottlenecks.
+6. Going silent for long stretches.
+7. Spending 20 minutes on one small detail (e.g. the exact DB schema) and never finishing the high-level design.
+8. Arguing with the interviewer instead of exploring their point.
+
+<Callout type="frontend">
+Many companies run a **frontend system design** round for frontend roles (Module 8), but frontend engineers are also often given backend-style questions. Your strength: you can talk confidently about the **client** side of any design: caching on the client, optimistic UI, real-time connections, pagination, performance budgets. Use it!
+</Callout>
+
+<Takeaways>
+- **Think out loud** and check in; take hints.
+- Use the **trade-off sentence**: choice → because → downside → why acceptable → when you'd switch.
+- Prepare a **failure checklist** for every component.
+- Treat pushback as exploration: **acknowledge, compare, adapt**.
+- Deep-dive into what's **unique and hard** about the problem.
+</Takeaways>
+
+<Quiz
+  id="driving"
+  questions={[
+    { q: 'The interviewer asks “Why not PostgreSQL instead of Cassandra here?” Best response?', options: ['Insist Cassandra is always better', 'Compare both against the requirements, acknowledge Postgres’s strengths, and explain (or adjust) your choice', 'Switch immediately without explanation', 'Say it doesn’t matter'], answer: 1, explain: 'They want to see trade-off reasoning, not stubbornness or blind agreement.' },
+    { q: 'What is a good deep-dive for “Design a ticket booking system”?', options: ['The CSS of the seat map', 'Preventing double booking under concurrency, with seat holds that expire', 'Choosing an IDE', 'Logging format'], answer: 1, explain: 'Concurrency and correctness is the unique, hard part of booking systems.' },
+    { q: '“What if your cache cluster goes down?” A solid answer includes…', options: ['“It won’t.”', 'Cache-aside falls back to the DB; protect the DB from a stampede (rate limits, warming); run Redis replicated', 'Restart everything', 'Remove the cache'], answer: 1, explain: 'Explain degraded behavior and how you protect the rest of the system.' },
+    { q: 'Which is a common way to lose points?', options: ['Asking clarifying questions', 'Adding many technologies without explaining why', 'Stating assumptions', 'Summarizing at the end'], answer: 1, explain: 'Unjustified components (cargo-culting) are a red flag.' },
+  ]}
+/>

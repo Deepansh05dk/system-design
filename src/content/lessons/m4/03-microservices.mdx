@@ -1,0 +1,95 @@
+---
+title: Monolith vs Microservices
+slug: monolith-vs-microservices
+description: One big app or many small services? The real trade-offs, how services find each other, and why most companies should start with a monolith.
+module: m4
+order: 3
+minutes: 14
+---
+
+<Callout type="problem">
+Your startup's app is one codebase. Now 80 engineers work in it. Every deploy needs 6 teams to coordinate; a bug in "recommendations" crashes "checkout"; the search feature needs 20× more servers than everything else, but you can only scale the whole app together. **Should you split it up? And what new problems does that create?**
+</Callout>
+
+## The two shapes
+
+<Versus
+  items={[
+    { name: 'Monolith', icon: '🏛️', pros: ['One codebase, one deploy, one database', 'Simple local development and debugging', 'Function calls instead of network calls: fast, no partial failures', 'Transactions across features are easy'], cons: ['Teams step on each other as it grows', 'Must scale everything together', 'One bug or memory leak can take down everything', 'One tech stack for all'], use: 'Startups, small/medium teams, new products. Most systems should <b>start</b> here (a “modular monolith”).' },
+    { name: 'Microservices', icon: '🧩', pros: ['Teams own and deploy services independently', 'Scale each service separately', 'Failure isolation (with the right patterns)', 'Different tech per service where useful'], cons: ['Network calls everywhere: latency, timeouts, partial failures', 'No easy cross-service transactions (sagas)', 'Much more infrastructure: discovery, tracing, CI/CD, gateways', 'Harder to debug and test end to end'], use: 'Large organizations with many teams, clear domain boundaries, and different scaling needs.' },
+  ]}
+/>
+
+<Callout type="analogy">
+A monolith is a **food truck**: one kitchen, one team, very efficient while small. Microservices are a **food court**: each stall has its own kitchen and staff, can expand independently, and one stall closing doesn't close the others, but now you need shared seating, a payment system, cleaners and a manager to coordinate.
+</Callout>
+
+## How to split: by business capability
+
+Good service boundaries follow **business domains** (users, orders, payments, catalog, notifications), not technical layers ("the database service", "the validation service"). Each service:
+- **owns its data**: its own database, which no other service touches directly,
+- exposes an **API** (or events),
+- can be built, deployed and scaled by **one team**.
+
+<Callout type="mistake">
+A "distributed monolith": services that share one database or must be deployed together. You get all the costs of microservices and none of the benefits. If two services always change together, they should probably be one service.
+</Callout>
+
+## Service discovery
+
+In a dynamic environment, service instances come and go (auto-scaling, deploys, failures), and their IPs change. How does the order service find a healthy payment service instance?
+
+<ArchFlow
+  title="Service discovery"
+  height={300}
+  nodes={[
+    { id: 'o', label: 'Order service', kind: 'service', x: 120, y: 150 },
+    { id: 'reg', label: 'Service registry', sub: 'Consul / K8s DNS', kind: 'dns', x: 420, y: 60 },
+    { id: 'p1', label: 'Payment #1', sub: '10.0.3.17', kind: 'service', x: 720, y: 90 },
+    { id: 'p2', label: 'Payment #2', sub: '10.0.5.42', kind: 'service', x: 720, y: 220 },
+  ]}
+  edges={[
+    { from: 'p1', to: 'reg', label: 'register + heartbeat', dashed: true },
+    { from: 'p2', to: 'reg', dashed: true },
+    { from: 'o', to: 'reg', label: 'where is payment?' },
+    { from: 'o', to: 'p2', label: 'call' },
+  ]}
+  steps={[
+    { title: 'Instances register themselves', text: 'When a payment instance starts, it registers its address with the <b>service registry</b> and sends heartbeats. Dead instances are removed automatically.', add: ['reg', 'p1', 'p2'], flow: ['p1>reg', 'p2>reg'] },
+    { title: 'Callers look up healthy instances', text: 'The order service asks “where is payment?” and gets the current healthy list (in Kubernetes this is just DNS: <code>payment.default.svc.cluster.local</code>).', add: ['o'], flow: ['o>reg', 'reg>o'] },
+    { title: 'Call one of them', text: 'The caller (or a sidecar proxy) load-balances across instances. A <b>service mesh</b> (Istio, Linkerd) moves retries, timeouts, mTLS and circuit breaking into sidecars, out of your code.', flow: ['o>p2'] },
+  ]}
+/>
+
+## Communication between services
+
+- **Synchronous** (REST/gRPC): simple request-response, but creates **temporal coupling**: if payment is down, ordering fails. Chains of sync calls multiply latency and failure rates.
+- **Asynchronous** (events/queues): "OrderPlaced" is published; others react when they can. More resilient and decoupled; eventually consistent.
+
+Rule of thumb: **sync for queries that need an answer now; async for "something happened, react to it"**.
+
+## What microservices require (the hidden cost)
+
+Centralized logging, distributed tracing (Module 5), API gateway, service discovery, per-service CI/CD pipelines, container orchestration (Kubernetes), contract testing, on-call per team. That's why the advice is: **start with a well-structured (modular) monolith, and extract services when there's a real reason**: team scaling, wildly different scaling needs, or fault isolation.
+
+<Callout type="interview">
+In interviews, it's fine to draw services (User, Post, Feed, Notification…) since it clarifies responsibilities. But show judgment: "These are logical services; at our early stage they could live in one deployable, and we'd split out **Feed** first because its scaling profile is very different." Mention **each service owns its data**, **async events between services**, and **service discovery** via Kubernetes.
+</Callout>
+
+<Takeaways>
+- **Monolith:** simple and fast to build; struggles with many teams and uneven scaling.
+- **Microservices:** independent deploys and scaling, but network failures, distributed data and heavy infrastructure.
+- Split by **business capability**; each service **owns its data**. Avoid the distributed monolith.
+- **Service discovery** (registry / K8s DNS) finds healthy instances; service meshes handle retries/mTLS.
+- **Start modular monolith**, extract services for clear reasons.
+</Takeaways>
+
+<Quiz
+  id="microservices"
+  questions={[
+    { q: 'Three services share one database and must be deployed together. What is this called?', options: ['A modular monolith', 'A distributed monolith (anti-pattern)', 'Event sourcing', 'A service mesh'], answer: 1, explain: 'All the costs of distribution, none of the independence.' },
+    { q: 'What does service discovery solve?', options: ['Finding bugs', 'Finding the current addresses of healthy service instances as they scale and move', 'Encrypting traffic', 'Database sharding'], answer: 1, explain: 'Instances change constantly; the registry (or K8s DNS) tracks them.' },
+    { q: 'For a 5-person startup building a new product, what’s usually the best start?', options: ['20 microservices', 'A well-structured modular monolith', 'Serverless functions for every endpoint', 'A service mesh'], answer: 1, explain: 'Microservices’ overhead rarely pays off for small teams. Split later when needed.' },
+    { q: 'Why can long chains of synchronous service calls be risky?', options: ['They are always slower than async', 'Latency adds up and any one failure breaks the whole chain', 'They need GraphQL', 'They can’t use HTTPS'], answer: 1, explain: 'Availability multiplies: 5 services at 99.9% each ≈ 99.5% for the chain.' },
+  ]}
+/>
