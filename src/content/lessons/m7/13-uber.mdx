@@ -1,0 +1,118 @@
+---
+title: Design Uber / Ola (Ride Sharing)
+slug: design-uber
+description: Match riders with nearby drivers in real time. High-frequency location updates, in-memory geospatial indexes, matching, and keeping trip state consistent.
+module: m7
+order: 13
+minutes: 30
+difficulty: Hard
+---
+
+<Callout type="problem">
+Millions of drivers send their GPS location **every 4 seconds**. When a rider taps "Book", the system must find the best nearby available driver within a second or two, make sure two riders never get the same driver, track the trip live on both phones, and compute the fare. Location data changes constantly, which is the opposite of most databases' comfort zone.
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. Drivers go online/offline and continuously report location.
+2. Riders see nearby cars on the map and get an ETA/price estimate.
+3. Rider requests a ride → system **matches** a nearby driver → driver accepts/declines.
+4. Live trip tracking for both sides; trip completion and fare.
+*(Out of scope: payments details, ratings, surge-pricing algorithm, scheduled rides. Mention them.)*
+
+**Non-functional**
+- **Low latency matching** (seconds) and live updates (~1–4 s freshness).
+- **Consistency for assignments:** a driver must never be assigned to two riders.
+- **Highly available** (people stranded otherwise).
+- Scale: e.g. 5M active drivers at peak, 20M rides/day.
+
+## Step 2: Estimation
+
+- Location updates: 5M drivers ÷ 4 s ≈ **1.25M writes/sec**. Each update is tiny (~100 bytes) → ~125 MB/s.
+- Ride requests: 20M/day ≈ ~230/sec average (peaks of several thousand/sec in busy cities).
+
+**Conclusion:** location updates are **extremely write-heavy** and **only the latest value matters**. They must live **in memory**, not as rows in a disk-based database. Trip records, by contrast, are lower volume and need durability and consistency.
+
+## Step 3: Geospatial indexing (recap)
+
+To find "available drivers within 2 km" quickly, index drivers by **cell** (geohash, Google S2 or Uber's own **H3 hexagons**). Look up the rider's cell and its neighbours, then rank candidates by real ETA.
+
+<GeoGrid />
+
+## Step 4: High-level design
+
+<ArchFlow
+  title="Ride-sharing architecture"
+  height={460}
+  nodes={[
+    { id: 'd', label: 'Driver app', kind: 'mobile', x: 80, y: 100 },
+    { id: 'r', label: 'Rider app', kind: 'mobile', x: 80, y: 360 },
+    { id: 'gw', label: 'Gateways', sub: 'WebSocket', kind: 'gateway', x: 260, y: 230 },
+    { id: 'loc', label: 'Location service', kind: 'service', x: 470, y: 90 },
+    { id: 'geo', label: 'Geo index', sub: 'in-memory: cell → drivers', kind: 'cache', x: 700, y: 90 },
+    { id: 'k', label: 'Kafka', sub: 'location stream', kind: 'queue', x: 700, y: 210 },
+    { id: 'match', label: 'Matching service', sub: 'per city', kind: 'service', x: 470, y: 290 },
+    { id: 'trip', label: 'Trip service', sub: 'state machine', kind: 'service', x: 470, y: 410 },
+    { id: 'tdb', label: 'Trip DB', sub: 'strongly consistent', kind: 'db', x: 700, y: 410 },
+    { id: 'eta', label: 'Maps / ETA', kind: 'external', x: 880, y: 290 },
+    { id: 'hist', label: 'History & analytics', sub: 'S3 / warehouse', kind: 'storage', x: 900, y: 160 },
+  ]}
+  edges={[
+    { from: 'd', to: 'gw', label: 'GPS every 4 s' },
+    { from: 'r', to: 'gw' },
+    { from: 'gw', to: 'loc' },
+    { from: 'loc', to: 'geo', label: 'update cell' },
+    { from: 'loc', to: 'k' },
+    { from: 'k', to: 'hist' },
+    { from: 'gw', to: 'match', label: 'request ride' },
+    { from: 'match', to: 'geo', label: 'nearby drivers' },
+    { from: 'match', to: 'eta' },
+    { from: 'match', to: 'trip', label: 'assign' },
+    { from: 'trip', to: 'tdb' },
+  ]}
+  steps={[
+    { title: 'Drivers stream locations', text: 'Driver apps keep a persistent connection and send <code>(driverId, lat, lng, status, heading)</code> every ~4 s.', add: ['d', 'gw', 'loc'], flow: ['d>gw', 'gw>loc'] },
+    { title: 'Update the in-memory geo index', text: 'The location service updates the driver’s current cell in an <b>in-memory geo index</b> (Redis GEO or custom servers sharded by city/region). Old positions simply get overwritten; entries expire if a driver stops reporting.', add: ['geo'], flow: ['loc>geo'] },
+    { title: 'Keep history asynchronously', text: 'Location events also go to Kafka for trip tracking, fraud detection, ETA model training and analytics, stored cheaply in S3/a warehouse. The hot path never waits on this.', add: ['k', 'hist'], flow: ['loc>k', 'k>hist'] },
+    { title: 'Rider requests a ride', text: 'The matching service (sharded by city) queries the geo index for available drivers in the rider’s cell and neighbouring cells, then ranks candidates by <b>road ETA</b> (not straight-line distance) using the maps service.', add: ['r', 'match', 'eta'], flow: ['r>gw', 'gw>match', 'match>geo', 'match>eta'] },
+    { title: 'Assign the driver safely', text: 'The match is offered to the best driver. The trip service creates the trip and <b>atomically</b> claims the driver (conditional update: only if the driver is still available). If the driver declines or times out (~10 s), offer it to the next one.', add: ['trip', 'tdb'], flow: ['match>trip', 'trip>tdb'] },
+  ]}
+/>
+
+## Deep dives
+
+**Why in memory?** 1.25M updates/sec where only the latest matters: a disk-based B-tree database would spend all its time rewriting index pages. In-memory structures (sharded by region) handle this easily; losing them in a crash is fine because drivers re-report within seconds.
+
+**Sharding by geography.** Most queries are local, so partition location and matching **by city/region**. A busy city (e.g. Mumbai) may need several shards (by H3 cells). Cross-border queries look at neighbouring shards.
+
+**No double assignment.** Two matching requests could pick the same driver at the same moment. Protect with an atomic state transition on the driver/trip record: `UPDATE drivers SET status='assigned', trip_id=? WHERE id=? AND status='available'`. The loser retries with the next candidate. (Module 3: concurrency.)
+
+**Trip state machine.** `requested → driver_assigned → driver_arrived → in_progress → completed / cancelled`. Transitions are validated and stored durably; every transition is an event (for notifications, billing, analytics). The trip DB needs **strong consistency** and durability; this is where a relational DB or a strongly consistent distributed DB fits.
+
+**Live tracking.** During a trip, the driver's location updates are forwarded to the rider's connection (pub/sub keyed by trip ID). Clients interpolate between points for smooth movement.
+
+**Surge pricing (mention).** A stream job compares demand (requests) vs supply (available drivers) per cell every minute; multipliers are published to the pricing service.
+
+**Reliability.** If a region's matching service fails, riders must still be able to complete trips. Uber famously used phone-side state as a backup so active trips could recover after a data center failover.
+
+<Callout type="interview">
+Key points: **location updates are extremely write-heavy and ephemeral → in-memory geo index (geohash/S2/H3), sharded by city**, **history via Kafka to cheap storage**, **matching by ETA over nearby cells**, **atomic driver assignment** (no double booking), and a **durable trip state machine**. Show the numbers that justify in-memory storage.
+</Callout>
+
+<Takeaways>
+- ~1M+ location writes/sec, only the latest matters → **in-memory geo index**, **sharded by geography**.
+- Find drivers via **cells + neighbours**, rank by **road ETA**.
+- **Atomic conditional updates** prevent assigning one driver twice.
+- **Trip state machine** in a strongly consistent store; location history and analytics via **Kafka → S3/warehouse**.
+</Takeaways>
+
+<Quiz
+  id="p-uber"
+  questions={[
+    { q: 'Why are drivers’ current locations kept in memory instead of a relational DB?', options: ['Memory is cheaper', 'Over a million tiny updates per second where only the latest value matters; disk-based indexes can’t keep up efficiently', 'Locations are secret', 'SQL can’t store decimals'], answer: 1, explain: 'Ephemeral, high-frequency data fits in-memory structures; drivers re-report if lost.' },
+    { q: 'How do you prevent two riders from being assigned the same driver?', options: ['Hope it doesn’t happen', 'Atomic conditional update: assign only if the driver is still available', 'Use a bigger server', 'Assign randomly'], answer: 1, explain: 'The losing request sees 0 rows updated and tries the next candidate.' },
+    { q: 'Why rank candidate drivers by ETA instead of straight-line distance?', options: ['ETA is easier to compute', 'A driver 500 m away across a river may take 20 minutes; road travel time is what matters', 'Distance is not available', 'It’s required by law'], answer: 1, explain: 'Roads, traffic and direction determine real pickup time.' },
+    { q: 'What is the natural way to shard location and matching?', options: ['By driver name', 'By geography (city / cells)', 'Randomly', 'By phone model'], answer: 1, explain: 'Matching is local, so geographic sharding keeps related data together.' },
+  ]}
+/>

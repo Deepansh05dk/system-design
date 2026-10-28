@@ -1,0 +1,115 @@
+---
+title: Design Search Autocomplete (Typeahead)
+slug: design-search-autocomplete
+description: Suggest the top searches as the user types, in under 100 ms. Tries with cached top-K, offline aggregation from logs, caching and the frontend side.
+module: m7
+order: 9
+minutes: 24
+difficulty: Medium
+---
+
+<Callout type="problem">
+As you type "sys" into a search box, suggestions like "system design", "system design interview" appear **before you finish the next keystroke**. Google handles billions of these lookups per day. Each keystroke is a request, so a 10-character query is up to 10 requests, and each must answer in tens of milliseconds. As a frontend developer, you've built the input box. Now let's build what's behind it.
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. Given a prefix, return the **top 5–10** most popular completions.
+2. Suggestions reflect popularity (search frequency), updated **periodically** (e.g. daily/hourly).
+3. *(Stretch)* Personalization, trending queries, filtering offensive terms, multiple languages.
+
+**Non-functional**
+- **Very low latency:** < 100 ms end to end (the server part < ~20 ms).
+- **Highly available**; slightly stale suggestions are fine.
+- Very read-heavy: every keystroke is a read; "writes" are just search logs.
+
+## Step 2: Estimation
+
+- 100M DAU × 10 searches × ~6 keystrokes (after debouncing) ≈ 6B suggestion requests/day ≈ **~70K QPS** (peak ~200K).
+- Distinct popular queries to index: tens to hundreds of millions; with top-K cached per node the trie is **tens of GB**, so it must be **sharded/replicated** in memory.
+
+## Step 3: The core data structure: a trie with cached top-K
+
+A **trie** (prefix tree) stores strings character by character. All queries starting with "sy" are below the node `s → y`. Naively, finding the top 5 under a node means visiting the whole subtree: far too slow. The trick: **precompute and store the top-K completions at every node**.
+
+<TrieSim />
+
+Lookup cost = walk the prefix (a few steps) + read a stored list. No sorting at request time.
+
+## Step 4: Two separate flows
+
+<ArchFlow
+  title="Typeahead: serving path and data-building path"
+  height={420}
+  nodes={[
+    { id: 'u', label: 'Browser', sub: 'debounced input', kind: 'client', x: 90, y: 110 },
+    { id: 'cdn', label: 'CDN / edge cache', sub: 'popular prefixes', kind: 'cdn', x: 290, y: 110 },
+    { id: 'api', label: 'Suggest service', kind: 'service', x: 500, y: 110 },
+    { id: 'trie', label: 'Trie servers', sub: 'in-memory, sharded by prefix', kind: 'cache', icon: '🌳', x: 760, y: 110 },
+    { id: 'logs', label: 'Search logs', sub: 'Kafka', kind: 'queue', x: 290, y: 320 },
+    { id: 'agg', label: 'Aggregation job', sub: 'Spark / Flink', kind: 'worker', x: 500, y: 320 },
+    { id: 'freq', label: 'Query counts', sub: 'table / S3', kind: 'db', x: 700, y: 320 },
+    { id: 'build', label: 'Trie builder', sub: 'snapshot + deploy', kind: 'worker', x: 880, y: 250 },
+  ]}
+  edges={[
+    { from: 'u', to: 'cdn', label: 'GET /suggest?q=sy' },
+    { from: 'cdn', to: 'api', label: 'miss' },
+    { from: 'api', to: 'trie' },
+    { from: 'u', to: 'logs', label: 'search submitted', dashed: true },
+    { from: 'logs', to: 'agg' },
+    { from: 'agg', to: 'freq', label: 'counts per query' },
+    { from: 'freq', to: 'build' },
+    { from: 'build', to: 'trie', label: 'load new version' },
+  ]}
+  steps={[
+    { title: 'Serving: request a prefix', text: 'The browser sends <code>GET /suggest?q=sy</code> after a short debounce. Popular prefixes (“a”, “we”, “how to”) are cached at the CDN/edge for minutes: same answer for everyone.', add: ['u', 'cdn'], flow: ['u>cdn'] },
+    { title: 'Serving: trie lookup in memory', text: 'On a cache miss, the suggest service asks the trie server that owns this prefix. The trie lives <b>entirely in memory</b>; the lookup takes microseconds.', add: ['api', 'trie'], flow: ['cdn>api', 'api>trie'] },
+    { title: 'Building: collect what people search', text: 'Every <b>submitted</b> search (not every keystroke) is logged to Kafka with timestamp, language and region.', add: ['logs'], flow: ['u>logs'] },
+    { title: 'Building: aggregate frequencies', text: 'A batch job (hourly/daily) counts queries, ideally with time decay (recent searches weigh more), and filters out offensive/rare/private queries.', add: ['agg', 'freq'], flow: ['logs>agg', 'agg>freq'] },
+    { title: 'Building: rebuild and swap the trie', text: 'A builder creates a new trie with top-K per node, serializes a snapshot, and trie servers load it and atomically swap from the old version (blue/green). No writes to the live trie during serving.', add: ['build'], flow: ['freq>build', 'build>trie'] },
+  ]}
+/>
+
+<Callout type="why" title="Why not update the trie on every search?">
+Updating top-K lists along a path on every search means constant writes and locking on a structure serving 200K reads/sec. Popularity changes slowly, so **rebuild offline and swap**. For **trending** topics that need minutes-fresh data, add a small real-time layer (stream processing over the last hour) and merge its results with the main trie.
+</Callout>
+
+## Deep dives
+
+**Sharding the trie.** Split by prefix range (`a–c`, `d–f`, …) with care: some ranges ("s", "c") are much bigger. Use a shard map based on actual sizes (like directory-based sharding), and replicate each shard for availability and read throughput.
+
+**Alternatives to a custom trie.** Elasticsearch completion suggesters or Redis sorted sets keyed by prefix (`ZREVRANGE prefix:sy 0 4`) work well at moderate scale. Say so: it shows you won't over-build.
+
+**Personalization.** Merge the global top-K with the user's own recent searches (from a small per-user store) on the server or client.
+
+**Filtering.** Remove offensive, dangerous or personally identifying queries in the aggregation step, plus a blocklist checked at serving time for fast takedowns.
+
+## The frontend side (your strength!)
+
+- **Debounce** input (~100–150 ms) so fast typists don't send a request per character.
+- **Cancel stale requests** (`AbortController`) and ignore out-of-order responses: a slow response for "sy" must not overwrite results for "sys".
+- **Client cache** of prefix → results; when the user deletes a character, show cached results instantly.
+- **Prefetch** results for the next likely character, or ship the top ~1,000 queries in the initial bundle.
+- **Keyboard navigation and accessibility** (`role="combobox"`, `aria-activedescendant`), highlighting the matched part.
+
+<Callout type="interview">
+Key points: **trie with top-K cached at each node** (lookup = O(prefix length)), **in-memory, sharded and replicated**, built **offline from search logs** and **swapped atomically**, **CDN caching** for popular prefixes, plus **debounce/cancel/client cache** on the frontend. Mention a real-time layer for trending only if asked.
+</Callout>
+
+<Takeaways>
+- **Trie + precomputed top-K per node** → answers in microseconds.
+- Separate the **serving path** (read-only, in memory, cached at CDN) from the **build path** (logs → aggregation → new trie → swap).
+- Shard by prefix (unevenly sized ranges!) and replicate.
+- Frontend: **debounce, cancel stale requests, cache prefixes, keyboard accessibility**.
+</Takeaways>
+
+<Quiz
+  id="p-typeahead"
+  questions={[
+    { q: 'Why store the top-K suggestions at every trie node?', options: ['To save memory', 'So a lookup doesn’t need to scan the whole subtree and sort at request time', 'Tries require it', 'For security'], answer: 1, explain: 'Precomputation turns an expensive subtree scan into a simple list read.' },
+    { q: 'How is the trie usually kept up to date?', options: ['Updated on every keystroke', 'Rebuilt periodically from aggregated search logs and swapped in atomically', 'Never updated', 'Edited by hand'], answer: 1, explain: 'Offline rebuild avoids write contention on a read-hot structure.' },
+    { q: 'A slow response for “sy” arrives after the response for “sys”. What should the frontend do?', options: ['Show the “sy” results', 'Ignore/cancel stale responses so only the latest query’s results are shown', 'Reload the page', 'Show both lists'], answer: 1, explain: 'Use AbortController or compare request IDs to discard out-of-order results.' },
+    { q: 'Why log submitted searches rather than every keystroke for building suggestions?', options: ['Keystrokes are encrypted', 'Partial keystrokes are noise; completed searches reflect real intent and are far fewer', 'It’s required by GDPR', 'Kafka can’t handle keystrokes'], answer: 1, explain: 'Suggestions should come from what people actually searched for.' },
+  ]}
+/>

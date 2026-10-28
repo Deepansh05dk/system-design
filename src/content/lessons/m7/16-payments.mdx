@@ -1,0 +1,148 @@
+---
+title: Design a Payment System
+slug: design-a-payment-system
+description: Move money correctly. Idempotency, payment state machines, double-entry ledgers, external PSPs, webhooks and reconciliation.
+module: m7
+order: 16
+minutes: 30
+difficulty: Hard
+---
+
+<Callout type="problem">
+An e-commerce site processes 1 million orders a day. Every one must charge the customer **exactly once**, record the money correctly, pay the seller, survive network timeouts with the card network, and pass an audit. A bug here doesn't show a wrong like count; it **loses real money** or charges someone twice. In payment systems, **correctness beats everything**.
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. Accept payments for orders (cards, UPI, wallets) via external **payment service providers (PSPs)** like Stripe, Razorpay, Adyen.
+2. Track each payment's status; notify the order system.
+3. Refunds.
+4. Record every money movement in a **ledger**; pay out sellers *(stretch)*.
+5. Reconcile with PSP/bank reports daily.
+
+**Non-functional**
+- **Correctness:** no double charges, no lost payments, every rupee accounted for.
+- **Reliability:** retries must be safe; recover from any crash mid-flow.
+- **Auditability:** immutable history.
+- **Security & compliance:** PCI DSS: never store raw card numbers yourself.
+- Throughput is modest (1M/day ≈ 12/sec; peaks ~1,000/sec on sale days). Latency matters less than correctness.
+
+## Step 2: Don't touch card numbers
+
+Use the PSP's hosted checkout/SDK: the card details go **directly from the browser/app to the PSP**, which returns a **token**. Your servers only see the token. This keeps you out of most PCI scope, which is a huge cost and risk reduction.
+
+## Step 3: Payment flow
+
+<SequenceFlow
+  title="Paying for order #991"
+  actors={[
+    { id: 'c', label: 'Checkout (client)', icon: '🛒' },
+    { id: 'ps', label: 'Payment service', icon: '💰' },
+    { id: 'db', label: 'Payments DB', icon: '🗄️' },
+    { id: 'psp', label: 'PSP (Stripe/Razorpay)', icon: '🏦' },
+  ]}
+  messages={[
+    { from: 'c', to: 'ps', label: 'POST /payments {order 991, ₹2,000, token} Idempotency-Key: k-991', note: 'The idempotency key is derived from the order (or generated once at checkout start). Retries reuse it.' },
+    { from: 'ps', to: 'db', label: 'insert payment (status CREATED, key k-991 unique)', note: 'If the key already exists, return the existing payment’s status instead of creating a new one. <b>No double charge on retries.</b>' },
+    { from: 'ps', to: 'psp', label: 'charge(token, ₹2,000, idempotency=k-991)', note: 'Pass an idempotency key to the PSP too, so a retried call after a timeout doesn’t charge twice at the PSP either. Status → PENDING.' },
+    { from: 'psp', to: 'ps', label: 'timeout… (unknown outcome!)', dashed: true, bad: true, note: 'The scary case: did the charge happen? Don’t guess. Retry with the same key (safe), or query the PSP for the payment status.' },
+    { from: 'psp', to: 'ps', label: 'webhook: payment_succeeded (evt_123)', dashed: true, note: 'PSPs confirm asynchronously via signed webhooks. Verify the signature, dedup by event ID, then move the payment to SUCCEEDED.' },
+    { from: 'ps', to: 'db', label: 'SUCCEEDED + ledger entries (one transaction)', note: 'Update status and write double-entry ledger rows <b>atomically</b>, plus an outbox event <code>PaymentSucceeded</code>.' },
+    { from: 'ps', to: 'c', label: 'order confirmed', dashed: true, note: 'The order service consumes the event and confirms the order. The client polls or gets a push.' },
+  ]}
+/>
+
+## Step 4: Payment state machine
+
+```text
+CREATED → PENDING → SUCCEEDED → (REFUND_PENDING → REFUNDED)
+                  ↘ FAILED
+                  ↘ UNKNOWN → (resolved by status query / webhook / reconciliation)
+```
+
+Every transition is validated (`UPDATE ... WHERE status = 'PENDING'`) and recorded. Never jump states arbitrarily; never "delete" a payment.
+
+## Step 5: The ledger: double-entry bookkeeping
+
+Accountants solved "keep money correct" 500 years ago: every transaction has **two sides that sum to zero**. Money never appears or disappears; it moves between accounts.
+
+| entry_id | txn_id | account | debit | credit |
+|---|---|---|---|---|
+| 1 | pay_991 | customer_funds (asha) | ₹2,000 | |
+| 2 | pay_991 | merchant_payable (shop_7) | | ₹1,940 |
+| 3 | pay_991 | platform_fee_revenue | | ₹60 |
+
+- Ledger rows are **append-only** (immutable). Corrections are **new** reversing entries, never edits.
+- **Invariant:** for every transaction, total debits = total credits. Run continuous checks; any imbalance is an alert.
+- Balances are **derived** by summing entries (with periodic snapshots for speed). This is event sourcing (Module 4).
+
+## Step 6: Architecture
+
+<ArchFlow
+  title="Payment system architecture"
+  height={440}
+  nodes={[
+    { id: 'o', label: 'Order service', kind: 'service', x: 90, y: 200 },
+    { id: 'ps', label: 'Payment service', sub: 'state machine', kind: 'service', x: 320, y: 200 },
+    { id: 'db', label: 'Payments + ledger DB', sub: 'ACID, sync replica', kind: 'db', x: 560, y: 320 },
+    { id: 'psp', label: 'PSPs', sub: 'Stripe / Razorpay', kind: 'external', x: 560, y: 80 },
+    { id: 'wh', label: 'Webhook handler', kind: 'service', x: 800, y: 80 },
+    { id: 'k', label: 'Event bus', sub: 'via outbox', kind: 'queue', x: 320, y: 380 },
+    { id: 'rec', label: 'Reconciliation job', sub: 'daily', kind: 'worker', x: 800, y: 320 },
+    { id: 'files', label: 'PSP settlement files', kind: 'storage', x: 800, y: 200 },
+  ]}
+  edges={[
+    { from: 'o', to: 'ps', label: 'pay(order, key)' },
+    { from: 'ps', to: 'db' },
+    { from: 'ps', to: 'psp', label: 'charge' },
+    { from: 'psp', to: 'wh', label: 'webhooks' },
+    { from: 'wh', to: 'db', label: 'update status', curve: 30 },
+    { from: 'db', to: 'k', label: 'outbox relay' },
+    { from: 'k', to: 'o', label: 'PaymentSucceeded' },
+    { from: 'psp', to: 'files', dashed: true },
+    { from: 'files', to: 'rec' },
+    { from: 'rec', to: 'db', label: 'compare' },
+  ]}
+  steps={[
+    { title: 'Charge with idempotency', text: 'The order service asks for payment with an idempotency key. The payment service records it and calls the PSP (with its own idempotency key).', add: ['o', 'ps', 'db', 'psp'], flow: ['o>ps', 'ps>db', 'ps>psp'] },
+    { title: 'Webhooks confirm', text: 'Asynchronous, signed webhooks update the state machine (deduplicated by event ID). A periodic job also queries the PSP for payments stuck in PENDING/UNKNOWN.', add: ['wh'], flow: ['psp>wh', 'wh>db'] },
+    { title: 'Outbox → events', text: 'Status change + ledger entries + outbox row commit in <b>one ACID transaction</b>. A relay publishes <code>PaymentSucceeded</code>; the order service consumes it idempotently.', add: ['k'], flow: ['db>k', 'k>o'] },
+    { title: 'Reconcile daily', text: 'PSPs and banks send settlement files. A reconciliation job compares every transaction in our ledger with theirs and flags mismatches (missing, extra, wrong amount) for investigation. This is how payment companies catch the bugs that slipped through everything else.', add: ['files', 'rec'], flow: ['psp>files', 'files>rec', 'rec>db'] },
+  ]}
+/>
+
+## Deep dives
+
+**Exactly-once effects.** Networks give at-least-once. You get exactly-once **effects** by combining: idempotency keys (client → us, us → PSP), unique constraints, conditional state transitions, deduplicated webhooks, and idempotent event consumers.
+
+**Database choice.** Strong consistency and transactions: **PostgreSQL/MySQL** (with synchronous replica for zero data loss on failover), or distributed SQL at very large scale. Not an eventually consistent store.
+
+**Multi-step flows (order → payment → inventory).** Use a **saga** (Module 3): if inventory reservation fails after payment, the compensating action is a **refund**.
+
+**Retries and timeouts.** Retry PSP calls with backoff using the same idempotency key. Use circuit breakers and maybe a second PSP for failover (routing by success rate and cost).
+
+**Security.** Tokenization (no raw cards), encryption, strict access controls, audit logs, fraud checks (velocity rules, ML risk scores) before charging.
+
+<Callout type="interview">
+Say these words: **idempotency keys end to end**, **payment state machine with conditional transitions**, **PSP tokenization (stay out of PCI scope)**, **signed + deduplicated webhooks**, **double-entry append-only ledger**, **outbox for events**, **daily reconciliation**. Make it clear you prioritize **correctness over latency** in this domain.
+</Callout>
+
+<Takeaways>
+- Never handle raw cards: **PSP tokens**.
+- **Idempotency keys** everywhere + unique constraints → no double charges on retries.
+- An explicit **state machine**; handle the **unknown outcome** by retrying safely or querying status.
+- **Double-entry, append-only ledger**: debits = credits, corrections are new entries.
+- **Outbox** for reliable events, **webhooks** deduplicated, **reconciliation** to catch everything else.
+</Takeaways>
+
+<Quiz
+  id="p-payments"
+  questions={[
+    { q: 'The PSP call times out. What’s the correct next step?', options: ['Assume it failed and charge again with a new key', 'Retry with the SAME idempotency key or query the PSP for the payment’s status', 'Mark the order paid', 'Ignore it'], answer: 1, explain: 'The outcome is unknown; only an idempotent retry or a status check is safe.' },
+    { q: 'In double-entry bookkeeping, every transaction must…', options: ['Have one entry', 'Have total debits equal to total credits', 'Be editable later', 'Use floating point'], answer: 1, explain: 'Money moves between accounts; it never appears or disappears.' },
+    { q: 'How do you fix a wrong ledger entry?', options: ['UPDATE the row', 'DELETE the row', 'Add a new reversing (correcting) entry', 'Ignore it'], answer: 2, explain: 'Ledgers are append-only for auditability.' },
+    { q: 'Why use a PSP’s hosted fields/SDK for card entry?', options: ['It looks nicer', 'Card numbers never touch your servers, keeping you mostly out of PCI scope', 'It’s faster', 'It avoids webhooks'], answer: 1, explain: 'Tokenization massively reduces security and compliance burden.' },
+    { q: 'What is reconciliation?', options: ['Retrying payments', 'Comparing your records with the PSP/bank’s reports to find mismatches', 'Encrypting data', 'Load balancing'], answer: 1, explain: 'The final safety net that catches bugs and missed webhooks.' },
+  ]}
+/>

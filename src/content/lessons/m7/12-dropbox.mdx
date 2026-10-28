@@ -1,0 +1,133 @@
+---
+title: Design Google Drive / Dropbox (File Sync)
+slug: design-dropbox
+description: Store files and keep them in sync across devices. Chunking, content-addressed deduplication, metadata vs block storage, sync notifications and conflicts.
+module: m7
+order: 12
+minutes: 28
+difficulty: Hard
+---
+
+<Callout type="problem">
+You edit one slide in a 200 MB presentation on your laptop. Seconds later the change appears on your phone and your colleague's computer. Your laptop was offline on a flight for 3 hours while your colleague also edited the same file. When you land, both versions must be handled sensibly. **How does file sync work without re-uploading 200 MB for every small change?**
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. Upload and download files; folders.
+2. **Sync** automatically across a user's devices.
+3. Share files/folders with others (view/edit).
+4. File **version history**; restore old versions.
+5. Work offline; sync when back online.
+
+**Non-functional**
+- **Reliability/durability:** never lose a file (this is the #1 requirement).
+- **Efficiency:** minimize bandwidth (mobile data, slow uplinks) and storage.
+- Sync latency of a few seconds; consistent view of a folder (no half-synced states visible).
+- Scale: 500M users, 50M DAU, average 200 files per user.
+
+## Step 2: Estimation
+
+- 500M users × 200 files × ~1 MB average ≈ **100 PB** of logical data (before dedup and versions).
+- 50M DAU × ~10 file changes/day = 500M updates/day ≈ **~6K writes/sec** of metadata.
+- Most edits are small changes to existing files → **delta sync** saves most bandwidth.
+
+## Step 3: Key idea: split files into blocks
+
+Instead of treating a file as one blob, split it into **blocks** (e.g. 4 MB), and identify each block by the **hash of its content** (SHA-256). A file becomes a **list of block hashes**.
+
+<ChunkSyncSim />
+
+Wins:
+- **Delta sync:** after an edit, only changed blocks are uploaded.
+- **Deduplication:** identical blocks (same file uploaded by 1,000 users, or unchanged blocks across versions) are stored **once**.
+- **Resumable transfers:** an interrupted upload resumes block by block.
+- **Versioning is cheap:** a new version is just a new block list that mostly points to existing blocks.
+
+<Callout type="deep" title="Going deeper: content-defined chunking">
+With fixed 4 MB blocks, inserting one byte at the start of a file shifts every block boundary, so every block "changes". **Content-defined chunking** (rolling hash, like rsync's) chooses boundaries based on content, so an insertion only changes the blocks around it. Good to mention for extra depth.
+</Callout>
+
+## Step 4: Data model: metadata vs blocks
+
+```text
+Metadata DB (strongly consistent, sharded by user/namespace; e.g. MySQL/Postgres):
+  files     (file_id, namespace_id, path, latest_version, is_deleted, ...)
+  versions  (file_id, version, block_hashes[], size, modified_by, modified_at)
+  namespaces/sharing (namespace_id, member_id, permission)
+  journal   (namespace_id, seq_no, change)   -- ordered log of changes per folder tree
+
+Block storage (object storage, content-addressed):
+  blocks/{sha256} → bytes (compressed, encrypted)
+```
+
+Metadata must be **strongly consistent** (it's the source of truth for "what is in my folder"); blocks are **immutable**, so they're trivially cacheable and replicable.
+
+## Step 5: High-level design
+
+<ArchFlow
+  title="File sync architecture"
+  height={440}
+  nodes={[
+    { id: 'a', label: 'Laptop client', sub: 'watcher + chunker', kind: 'client', x: 90, y: 110 },
+    { id: 'b', label: 'Phone client', kind: 'mobile', x: 90, y: 330 },
+    { id: 'meta', label: 'Metadata service', kind: 'service', x: 360, y: 110 },
+    { id: 'mdb', label: 'Metadata DB', sub: 'files, versions, journal', kind: 'db', x: 620, y: 60 },
+    { id: 'blk', label: 'Block service', kind: 'service', x: 360, y: 250 },
+    { id: 's3', label: 'Block storage', sub: 'S3, by hash', kind: 'storage', x: 620, y: 250 },
+    { id: 'notif', label: 'Notification service', sub: 'long poll / WebSocket', kind: 'queue', x: 360, y: 380 },
+  ]}
+  edges={[
+    { from: 'a', to: 'meta', label: '1. which blocks exist?' },
+    { from: 'a', to: 'blk', label: '2. upload missing blocks' },
+    { from: 'blk', to: 's3' },
+    { from: 'meta', to: 'mdb', label: '3. commit new version' },
+    { from: 'meta', to: 'notif', label: '4. namespace changed' },
+    { from: 'notif', to: 'b', label: '5. you have changes' },
+    { from: 'b', to: 'meta', label: '6. fetch changes', dashed: true, curve: -40 },
+    { from: 'b', to: 'blk', label: '7. download blocks', dashed: true },
+  ]}
+  steps={[
+    { title: 'Detect a change and chunk', text: 'The laptop client watches the folder. On save, it splits the file into blocks and hashes each one, locally.', add: ['a'], highlight: ['a'] },
+    { title: 'Ask which blocks the server needs', text: 'The client sends the new block-hash list. The metadata service replies with the hashes it <b>doesn’t</b> already have (dedup across versions and users).', add: ['meta', 'mdb'], flow: ['a>meta'] },
+    { title: 'Upload only missing blocks', text: 'Missing blocks are uploaded (compressed) to the block service / object storage, often in parallel and resumable.', add: ['blk', 's3'], flow: ['a>blk', 'blk>s3'] },
+    { title: 'Commit the new version atomically', text: 'Once all blocks are stored, the metadata service commits <code>version N+1 = [h1, h2, h9, h4…]</code> in a transaction and appends to the namespace’s <b>journal</b>. Commit after upload, so a version never references missing blocks.', flow: ['meta>mdb'] },
+    { title: 'Notify other devices', text: 'Devices keep a long-poll/WebSocket connection to the notification service. It tells them “namespace X changed”. No polling the whole file tree.', add: ['notif', 'b'], flow: ['meta>notif', 'notif>b'] },
+    { title: 'Other devices pull and apply', text: 'The phone asks “changes since journal seq 1042?”, gets the new block list, downloads only blocks it doesn’t have locally, and rebuilds the file.', flow: ['b>meta', 'b>blk'] },
+  ]}
+/>
+
+## Deep dives
+
+**Conflicts.** Two devices edit the same file from the same base version while offline. On commit, the server checks the **base version** (optimistic concurrency, Module 3): the first commit wins; the second gets a conflict. Dropbox's choice: keep both, saving the loser as **"file (Asha's conflicted copy).docx"**. Never silently lose data. (Google Docs avoids this for its own format with real-time collaboration (OT/CRDT); see Module 8.)
+
+**The journal.** Each namespace has an ordered change log with sequence numbers. Clients remember the last sequence they've applied; syncing is "give me everything after N". This makes offline catch-up and multiple devices simple and consistent.
+
+**Durability.** Blocks in object storage replicated across zones/regions; metadata DB with synchronous standby + backups. Keep deleted files and old versions for 30+ days (users panic-restore).
+
+**Security & sharing.** Encrypt blocks at rest; permission checks happen in the metadata service (blocks are only fetchable through it or via short-lived signed URLs). Sharing a folder = adding the user to the namespace.
+
+**Large-scale dedup caveat.** Cross-user dedup can leak information ("does someone already have this exact file?") and complicates per-user encryption. Some systems dedup only within a user's own data.
+
+<Callout type="interview">
+Essentials: **chunking + content hashing** (delta sync, dedup, resumable), **metadata DB (strongly consistent) vs immutable block storage**, **upload blocks then commit version**, **journal + notification service** for sync, and **conflict handling via base-version checks and conflicted copies**. Mention content-defined chunking for depth.
+</Callout>
+
+<Takeaways>
+- Files = **lists of content-hashed blocks** → delta sync, dedup, resumable transfers, cheap versions.
+- **Metadata** (strongly consistent DB + per-namespace journal) is separate from **immutable blocks** (object storage).
+- Flow: **hash → ask what’s missing → upload blocks → commit version → notify → others pull**.
+- Conflicts: **optimistic base-version check**, keep a **conflicted copy**, never lose data.
+</Takeaways>
+
+<Quiz
+  id="p-dropbox"
+  questions={[
+    { q: 'You change one paragraph in a 200 MB file. What does a block-based sync client upload?', options: ['The whole 200 MB', 'Only the changed blocks (often a few MB)', 'Nothing', 'A diff of every byte'], answer: 1, explain: 'Unchanged block hashes already exist on the server.' },
+    { q: 'Why identify blocks by the hash of their content?', options: ['Hashes are short filenames', 'Identical content gets the same ID, enabling dedup and cheap versioning', 'For alphabetical sorting', 'Required by S3'], answer: 1, explain: 'Content addressing makes “do we already have this?” a simple lookup.' },
+    { q: 'Why commit the new file version only after all blocks are uploaded?', options: ['It’s faster', 'So a version never points to blocks that don’t exist yet', 'To save storage', 'For encryption'], answer: 1, explain: 'Ordering writes prevents broken references if an upload fails midway.' },
+    { q: 'Two offline devices edited the same file. What does Dropbox-style sync do?', options: ['Keep the larger file', 'First commit wins; the other becomes a “conflicted copy” so nothing is lost', 'Merge bytes randomly', 'Delete both'], answer: 1, explain: 'Base-version check detects the conflict; user decides later.' },
+    { q: 'How do other devices learn about changes quickly without polling the full file tree?', options: ['Email', 'A notification service (long poll / WebSocket) + a per-namespace change journal', 'They don’t', 'DNS updates'], answer: 1, explain: 'Notify “something changed”, then fetch changes after the last applied sequence.' },
+  ]}
+/>

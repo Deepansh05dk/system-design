@@ -1,0 +1,114 @@
+---
+title: Design Yelp / Nearby Places (Proximity Search)
+slug: design-yelp
+description: Find restaurants near a location, with filters and reviews. A read-heavy geospatial search over mostly static data.
+module: m7
+order: 14
+minutes: 22
+difficulty: Medium
+---
+
+<Callout type="problem">
+"Show pizza places within 3 km of me, open now, rated 4+." Yelp, Google Maps and Zomato answer this millions of times an hour. Unlike Uber, businesses **don't move** and change rarely, but searches are extremely frequent and must combine **location**, **text** and **filters** quickly.
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. Search businesses near a location within a radius (with optional keyword/category, "open now", rating filters).
+2. View business details, photos and reviews.
+3. Business owners add/update businesses; users write reviews.
+
+**Non-functional**
+- Search latency < 200 ms; highly available.
+- **Very read-heavy:** searches ≫ business updates (new businesses can take minutes to appear).
+- Scale: 200M businesses worldwide, 100K searches/sec at peak.
+
+## Step 2: Estimation
+
+- 200M businesses × ~1 KB metadata = **200 GB**: the location index fits in memory on a handful of machines (replicated for throughput).
+- Searches: 100K QPS → spread across replicas; each query touches only a few cells.
+- Reviews: billions of rows; read per business, paginated → a separate store.
+
+**Conclusion:** the dataset is **small and static enough to replicate widely**. Read scaling via **replicas + caching** is the main tool; sharding is optional.
+
+## Step 3: Indexing locations
+
+<GeoGrid />
+
+Options (Module 3):
+- **Geohash** column with an index: pick precision from the radius (e.g. 6 chars ≈ 1.2 km cells), query the cell + 8 neighbours, then filter exact distance.
+- **Quadtree** in memory: adapts to density (Manhattan vs desert), built from the DB periodically; each search server holds a copy.
+- **Off-the-shelf:** PostGIS (GiST index), **Elasticsearch geo queries** (combine geo + text + filters + ranking in one query: very practical here).
+
+## Step 4: High-level design
+
+<ArchFlow
+  title="Proximity search architecture"
+  height={420}
+  nodes={[
+    { id: 'u', label: 'Users', kind: 'mobile', x: 80, y: 200 },
+    { id: 'lb', label: 'LB / gateway', kind: 'lb', x: 250, y: 200 },
+    { id: 'search', label: 'Search service', kind: 'service', x: 450, y: 110 },
+    { id: 'idx', label: 'Geo + text index', sub: 'Elasticsearch / quadtree replicas', kind: 'search', x: 700, y: 60, w: 170 },
+    { id: 'cache', label: 'Cache', sub: 'popular cells / queries', kind: 'cache', x: 700, y: 170 },
+    { id: 'biz', label: 'Business service', kind: 'service', x: 450, y: 290 },
+    { id: 'db', label: 'Business DB', sub: 'source of truth', kind: 'db', x: 700, y: 300 },
+    { id: 'rev', label: 'Reviews store', kind: 'db', x: 700, y: 400 },
+    { id: 'cdc', label: 'CDC → indexer', kind: 'queue', x: 900, y: 180 },
+  ]}
+  edges={[
+    { from: 'u', to: 'lb' },
+    { from: 'lb', to: 'search', label: 'GET /search?lat&lng&r&q' },
+    { from: 'search', to: 'cache' },
+    { from: 'search', to: 'idx' },
+    { from: 'lb', to: 'biz', label: 'details / reviews' },
+    { from: 'biz', to: 'db' },
+    { from: 'biz', to: 'rev' },
+    { from: 'db', to: 'cdc', label: 'changes' },
+    { from: 'cdc', to: 'idx', label: 'update index' },
+  ]}
+  steps={[
+    { title: 'Search request', text: '<code>GET /search?lat=19.07&lng=72.87&radius=3km&q=pizza&openNow=true</code>. The search service checks a cache keyed by (rounded location cell, query, filters): popular areas and queries repeat a lot.', add: ['u', 'lb', 'search', 'cache'], flow: ['u>lb', 'lb>search', 'search>cache'] },
+    { title: 'Geo + text + filters in the index', text: 'On a miss, query the index: businesses in the relevant cells, matching “pizza”, open now, rating ≥ 4, sorted by a mix of distance, rating and relevance. Return IDs + summary fields, paginated.', add: ['idx'], flow: ['search>idx'] },
+    { title: 'Details and reviews', text: 'Opening a business page reads details from the business DB (cached) and reviews from a reviews store partitioned by business_id, newest/most-helpful first.', add: ['biz', 'db', 'rev'], flow: ['lb>biz', 'biz>db', 'biz>rev'] },
+    { title: 'Updates flow into the index asynchronously', text: 'Owners edit businesses in the DB (source of truth). CDC/events update the search index within seconds–minutes. Eventual consistency is fine here.', add: ['cdc'], flow: ['db>cdc', 'cdc>idx'] },
+  ]}
+/>
+
+## Deep dives
+
+**Choosing the cell size from the radius.** Small radius (500 m) → longer geohash (7 chars); large radius (20 km) → shorter (4–5 chars). If too few results, **expand** to the next ring of cells or a coarser precision.
+
+**Quadtree specifics (if you choose it).** Leaves hold ≤ ~100 businesses. Build from the DB on startup (200M businesses takes minutes), keep it **read-only** in memory on every search server, and rebuild/swap periodically or apply small incremental updates. New servers load a snapshot instead of rebuilding.
+
+**Sharding (if the index outgrows memory or for write isolation).** By region is natural, but searches near borders need two shards. Alternatively shard by business ID and **scatter-gather** each search to all shards (each shard has its own geo index): simpler balancing, more fan-out.
+
+**Ranking.** Distance alone isn't enough: combine distance, rating, number of reviews, relevance to the text query, open hours, and personalization (cuisines you like). Usually computed by the search engine's scoring function or a reranking step.
+
+**Reviews and ratings.** Store each review; keep an aggregated `avg_rating` and `review_count` on the business (updated asynchronously) so searches can filter/sort on them without computing averages.
+
+<Callout type="why" title="Yelp vs Uber: why different designs?">
+Same core idea (geospatial index), different data behaviour. **Yelp:** static data, read-heavy → index built in batch, **replicated widely**, cached. **Uber:** constantly moving data, write-heavy → **in-memory index updated every few seconds**, sharded by city. Pointing out this contrast in an interview is a great signal.
+</Callout>
+
+<Callout type="interview">
+Cover: **geospatial index choice** (geohash / quadtree / Elasticsearch geo) with the **cell + neighbours** query, **read-heavy → replicate the index + cache popular cells**, **source-of-truth DB → CDC → index**, **ranking beyond distance**, and **reviews in a separate store with precomputed aggregates**.
+</Callout>
+
+<Takeaways>
+- Businesses are **static and read-heavy**: build the geo index offline and **replicate** it; cache hot areas.
+- Query **cell + neighbours**, pick precision from radius, expand if too few results.
+- **Elasticsearch** can combine geo, text, filters and ranking in one query.
+- Keep the DB as source of truth; sync the index with **CDC**; precompute rating aggregates.
+</Takeaways>
+
+<Quiz
+  id="p-yelp"
+  questions={[
+    { q: '200M businesses × 1 KB. What does that imply?', options: ['You need thousands of shards', 'The index (~200 GB) can be held in memory and replicated across a few machines', 'You can’t use a geo index', 'It must be stored on tape'], answer: 1, explain: 'Small enough to replicate widely for read throughput.' },
+    { q: 'A search with a tiny radius returns only 1 result. What can the service do?', options: ['Return 1 result', 'Expand to neighbouring rings of cells or a coarser precision until enough results', 'Return an error', 'Ask the user to move'], answer: 1, explain: 'Progressive expansion is a standard approach.' },
+    { q: 'Why is the Yelp geo index usually rebuilt/updated in the background rather than in real time?', options: ['Business data changes rarely and slight delays are acceptable', 'Geo indexes can’t be updated', 'For security', 'Elasticsearch requires it'], answer: 0, explain: 'Static data + read-heavy load = batch/async index updates are fine.' },
+    { q: 'How should average ratings be used in search filters?', options: ['Compute the average over all reviews per search', 'Store a precomputed avg_rating and review_count per business, updated asynchronously', 'Ignore ratings', 'Compute in the browser'], answer: 1, explain: 'Denormalized aggregates make filtering and sorting cheap.' },
+  ]}
+/>

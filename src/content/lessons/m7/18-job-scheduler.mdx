@@ -1,0 +1,127 @@
+---
+title: Design a Distributed Job Scheduler
+slug: design-a-job-scheduler
+description: Run millions of scheduled and recurring jobs reliably (“cron at scale”). Time-partitioned storage, leasing, exactly-once-ish execution and retries.
+module: m7
+order: 18
+minutes: 26
+difficulty: Hard
+---
+
+<Callout type="problem">
+Your platform must run: "send this reminder at 9:00 AM tomorrow", "generate every merchant's invoice on the 1st of each month", "retry this failed webhook in 5 minutes", "clean expired sessions every hour". That's millions of jobs, each must run **on time**, **once**, and **survive any server crashing**. A single server with crontab won't cut it.
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. Submit a job: one-off at a time (`runAt`) or recurring (`cron` expression), with a payload / target (HTTP endpoint, queue, function).
+2. Execute jobs at (or very close to) their scheduled time.
+3. Retries with backoff on failure; max attempts; dead-letter.
+4. Query job status/history; cancel/pause jobs.
+
+**Non-functional**
+- **Reliable:** no scheduled job silently lost; crashes don't drop jobs.
+- **At-least-once execution**, avoiding duplicates as much as possible (jobs should be idempotent).
+- **Timeliness:** start within ~1–5 seconds of the scheduled time.
+- **Scalable:** 10M+ jobs/day, with spikes (e.g. many jobs at midnight).
+- Highly available scheduler (no single point of failure).
+
+## Step 2: Estimation
+
+- 10M jobs/day ≈ 115/sec average; but **bursty**: "midnight" or "every hour on the hour" can mean 1M jobs at the same second.
+- Job record ~1 KB → 10 GB/day of history (keep 30 days ≈ 300 GB).
+
+## Step 3: Data model
+
+```sql
+jobs (
+  job_id        UUID PK,
+  owner, type,  -- http | queue | function
+  payload       JSONB,
+  schedule      TEXT NULL,       -- cron expression for recurring jobs
+  next_run_at   TIMESTAMP,       -- when it should run next
+  status        TEXT,            -- SCHEDULED | RUNNING | SUCCEEDED | FAILED | PAUSED
+  attempts      INT, max_attempts INT,
+  lease_owner   TEXT NULL, lease_until TIMESTAMP NULL,
+  version       INT
+)
+-- index (status, next_run_at)  ← "what is due now?"
+job_runs (run_id, job_id, started_at, finished_at, result, error)
+```
+
+The critical query: **"give me jobs with `next_run_at <= now` that nobody is running"**, fast, without two schedulers grabbing the same job.
+
+## Step 4: High-level design
+
+<ArchFlow
+  title="Distributed job scheduler"
+  height={440}
+  nodes={[
+    { id: 'c', label: 'Clients / services', kind: 'service', x: 90, y: 110 },
+    { id: 'api', label: 'Job API', kind: 'service', x: 300, y: 110 },
+    { id: 'db', label: 'Job store', sub: 'partitioned by time bucket', kind: 'db', x: 540, y: 110 },
+    { id: 'sch', label: 'Scheduler nodes', sub: 'each owns partitions', kind: 'service', icon: '⏰', x: 540, y: 270 },
+    { id: 'zk', label: 'etcd / ZooKeeper', sub: 'partition ownership', kind: 'service', icon: '🧭', x: 300, y: 270 },
+    { id: 'q', label: 'Ready queue', sub: 'Kafka / SQS', kind: 'queue', x: 760, y: 270 },
+    { id: 'w', label: 'Worker pool', sub: 'execute jobs', kind: 'worker', x: 760, y: 400 },
+    { id: 'tgt', label: 'Targets', sub: 'HTTP / functions', kind: 'external', x: 960, y: 400 },
+  ]}
+  edges={[
+    { from: 'c', to: 'api', label: 'create job' },
+    { from: 'api', to: 'db' },
+    { from: 'zk', to: 'sch', label: 'assign partitions' },
+    { from: 'sch', to: 'db', label: 'claim due jobs' },
+    { from: 'sch', to: 'q', label: 'enqueue' },
+    { from: 'q', to: 'w' },
+    { from: 'w', to: 'tgt', label: 'run' },
+    { from: 'w', to: 'db', label: 'status, next_run_at', curve: -80 },
+  ]}
+  steps={[
+    { title: 'Create a job', text: 'The API validates the schedule, computes <code>next_run_at</code> and stores the job. The job ID is returned immediately.', add: ['c', 'api', 'db'], flow: ['c>api', 'api>db'] },
+    { title: 'Split the work between schedulers', text: 'Jobs are partitioned (e.g. by hash of job_id, or by time bucket). A coordination service (etcd/ZooKeeper) assigns each partition to exactly one scheduler node; if a node dies, its partitions are reassigned in seconds.', add: ['zk', 'sch'], flow: ['zk>sch'] },
+    { title: 'Find and claim due jobs', text: 'Each scheduler polls its partitions every second: <code>UPDATE jobs SET status=RUNNING, lease_owner=me, lease_until=now()+5min WHERE partition=? AND status=SCHEDULED AND next_run_at<=now() LIMIT 500 RETURNING *</code> (or <code>SELECT … FOR UPDATE SKIP LOCKED</code>). Claiming is atomic, so no other node takes the same job.', flow: ['sch>db', 'db>sch'] },
+    { title: 'Hand off to workers through a queue', text: 'Claimed jobs go onto a ready queue. A separate worker fleet executes them, so slow jobs never delay scheduling, and workers scale independently with queue depth.', add: ['q', 'w', 'tgt'], flow: ['sch>q', 'q>w', 'w>tgt'] },
+    { title: 'Record the result, schedule the next run', text: 'Success → record the run; for recurring jobs compute the next <code>next_run_at</code> from the cron expression and set status back to SCHEDULED. Failure → retry with backoff (set <code>next_run_at = now + 2^attempts</code>) or mark FAILED after max attempts (dead letter).', flow: ['w>db'] },
+  ]}
+/>
+
+## Deep dives
+
+**Leases and crashes.** A worker or scheduler may die after claiming a job. The **lease** (`lease_until`) handles it: a recovery sweep re-schedules jobs whose lease expired while still RUNNING. This is why execution is **at-least-once**: a job may run twice if a worker finished but died before recording success. Therefore jobs must be **idempotent** (or carry an idempotency key to the target).
+
+**Avoiding duplicate claims.** Atomic claim via conditional UPDATE / `SKIP LOCKED`, plus partition ownership so normally only one scheduler even looks at a job. Fencing tokens (lease version) prevent a "zombie" worker from overwriting a newer run's result.
+
+**Hot moments (midnight spikes).** 1M jobs due at 00:00:00:
+- Claim in **batches**, many partitions in parallel.
+- **Pre-load** upcoming jobs: every minute, fetch jobs due in the next minute into an in-memory **timing wheel / delay queue** per scheduler, so execution is precise and the DB isn't hit at the exact second.
+- Encourage clients to add **jitter** ("around midnight") when exact time doesn't matter.
+
+**Storage partitioned by time.** Using time buckets (e.g. one partition per minute) makes "what's due now?" a scan of a small bucket, and old buckets can be archived cheaply. Many large systems store far-future jobs in a cheap store and move them into a "hot" short-term queue (like Redis sorted sets keyed by timestamp, or SQS delay queues) as their time approaches.
+
+**Recurring jobs.** Store the cron expression; after each run compute the next time. Decide policy for **missed runs** after an outage: run once now (catch-up) or skip to the next slot.
+
+**Simpler alternatives.** For moderate scale, a Postgres table with `FOR UPDATE SKIP LOCKED` + a worker pool, or managed tools (AWS EventBridge Scheduler, Temporal, Quartz cluster, Sidekiq/Celery beat), may be enough. Saying so shows judgment.
+
+<Callout type="interview">
+Cover: **durable job store with an index on next_run_at**, **partitioned schedulers with ownership via etcd/ZooKeeper** (no SPOF), **atomic claiming (conditional update / SKIP LOCKED) with leases**, **queue + separate workers**, **retries with backoff + DLQ**, **at-least-once → idempotent jobs**, and **handling bursts** (pre-loading, timing wheels, jitter).
+</Callout>
+
+<Takeaways>
+- Store jobs durably with **next_run_at**; scan only **due** jobs via an index or time buckets.
+- **Partition** the work; assign partitions with **consensus** so scheduler nodes can fail over.
+- **Claim atomically with leases**; expired leases are re-run → **at-least-once**, so jobs must be **idempotent**.
+- Separate **scheduling** from **execution** with a queue; retries with backoff; DLQ.
+- Smooth **bursts** with pre-loading, in-memory timing wheels and jitter.
+</Takeaways>
+
+<Quiz
+  id="p-scheduler"
+  questions={[
+    { q: 'How do you stop two scheduler nodes from running the same job?', options: ['Hope', 'Atomic claim (conditional UPDATE / SELECT … FOR UPDATE SKIP LOCKED) plus partition ownership', 'Run only one scheduler', 'Random delays'], answer: 1, explain: 'Only one claimer can transition the row; ownership reduces contention further.' },
+    { q: 'A worker dies mid-job. How does the job eventually run?', options: ['It’s lost', 'Its lease expires and a recovery process reschedules it', 'The client must resubmit', 'The DB runs it'], answer: 1, explain: 'Leases make crashed work recoverable, hence at-least-once semantics.' },
+    { q: 'Why must jobs be idempotent?', options: ['For speed', 'Because at-least-once execution means a job can occasionally run twice', 'Cron requires it', 'To save storage'], answer: 1, explain: 'A worker may finish the work but die before recording success.' },
+    { q: 'Why put a queue between schedulers and workers?', options: ['To slow things down', 'Slow jobs don’t delay scheduling, and workers scale independently', 'Queues store cron expressions', 'For encryption'], answer: 1, explain: 'Decoupling “deciding what runs” from “running it” improves timeliness and scale.' },
+    { q: '1M jobs are due at exactly midnight. Which helps?', options: ['One giant query at 00:00:00', 'Pre-loading upcoming jobs into in-memory timing wheels, batch claiming, and jitter', 'Disabling retries', 'Using a single worker'], answer: 1, explain: 'Spreading and preparing the work avoids a database stampede.' },
+  ]}
+/>

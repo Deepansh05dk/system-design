@@ -1,0 +1,110 @@
+---
+title: Design a Real-Time Leaderboard
+slug: design-a-leaderboard
+description: Top players and “my rank” among 100 million players, updated live. Redis sorted sets, sharding a leaderboard, and time-windowed boards.
+module: m7
+order: 17
+minutes: 20
+difficulty: Medium
+---
+
+<Callout type="problem">
+A mobile game has 100 million players. After every match, the player's score changes. Everyone wants to see the **global top 10**, **their own rank** ("you are #1,284,553"), and the players just above and below them, updated **instantly**. `SELECT COUNT(*) FROM players WHERE score > my_score` over 100M rows on every request won't work.
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. Update a player's score after each match.
+2. Show the top N (e.g. top 100).
+3. Show a player's rank and nearby players.
+4. Leaderboards per time window (daily/weekly/all-time) and per region/friends *(stretch)*.
+
+**Non-functional**
+- Real-time: updates visible within ~1 second.
+- Reads ≫ writes; low latency (< 50 ms).
+- Scale: 100M players, ~50K score updates/sec at peak, ~200K rank reads/sec.
+- Scores must not be lost (durable source of truth).
+
+## Step 2: The right data structure: a sorted set
+
+A **sorted set** keeps members ordered by score. Redis implements it with a **skip list + hash map**, so:
+
+| Operation | Redis command | Cost |
+|---|---|---|
+| Update score | `ZADD lb 4200 asha` / `ZINCRBY lb 150 asha` | O(log N) |
+| Top 10 | `ZREVRANGE lb 0 9 WITHSCORES` | O(log N + 10) |
+| My rank | `ZREVRANK lb asha` | O(log N) |
+| Players around me | `ZREVRANGE lb rank-5 rank+5` | O(log N + 10) |
+
+<LeaderboardSim />
+
+100M members × ~100 bytes ≈ **10 GB** in Redis: fits on one large node (plus a replica).
+
+## Step 3: High-level design
+
+<ArchFlow
+  title="Leaderboard architecture"
+  height={380}
+  nodes={[
+    { id: 'g', label: 'Game servers', sub: 'match results', kind: 'server', x: 90, y: 110 },
+    { id: 'c', label: 'Player apps', kind: 'mobile', x: 90, y: 290 },
+    { id: 'score', label: 'Score service', kind: 'service', x: 320, y: 110 },
+    { id: 'db', label: 'Scores DB', sub: 'source of truth', kind: 'db', x: 560, y: 40 },
+    { id: 'redis', label: 'Redis sorted sets', sub: 'lb:global, lb:daily:…', kind: 'cache', x: 560, y: 200 },
+    { id: 'lbapi', label: 'Leaderboard API', kind: 'service', x: 320, y: 290 },
+    { id: 'cache', label: 'Top-100 cache', sub: '1 s TTL', kind: 'cache', x: 560, y: 330 },
+  ]}
+  edges={[
+    { from: 'g', to: 'score', label: 'score +150' },
+    { from: 'score', to: 'db', label: 'persist' },
+    { from: 'score', to: 'redis', label: 'ZINCRBY' },
+    { from: 'c', to: 'lbapi' },
+    { from: 'lbapi', to: 'cache', label: 'top N' },
+    { from: 'lbapi', to: 'redis', label: 'rank / around me' },
+  ]}
+  steps={[
+    { title: 'Match finishes', text: 'The <b>game server</b> (trusted) reports the result, not the client, to prevent cheating. The score service persists the match result/score to the database (durable source of truth).', add: ['g', 'score', 'db'], flow: ['g>score', 'score>db'] },
+    { title: 'Update the sorted sets', text: '<code>ZINCRBY</code> on the global, daily and weekly boards (and region boards). Each is O(log N), around a millisecond.', add: ['redis'], flow: ['score>redis'] },
+    { title: 'Top N: serve from a tiny cache', text: 'Everyone requests the same top 100. Cache it for ~1 second (or in each API server’s memory): one Redis read per second instead of 100K.', add: ['c', 'lbapi', 'cache'], flow: ['c>lbapi', 'lbapi>cache'] },
+    { title: 'My rank and neighbours from Redis', text: '<code>ZREVRANK</code> + <code>ZREVRANGE</code> around that rank. Personalized, so not cached, but cheap.', flow: ['lbapi>redis'] },
+  ]}
+/>
+
+## Deep dives
+
+**Durability.** Redis is the fast **view**; the DB is the **truth**. If Redis is lost, rebuild the sorted sets from the database (scan + `ZADD` in batches). Also enable Redis replication (and AOF persistence) to avoid long rebuilds.
+
+**Time windows.** Use separate keys per window: `lb:daily:2026-10-28`, `lb:weekly:2026-W44`. Set a TTL so old boards expire. No need to "reset" anything.
+
+**Ties.** Equal scores sort lexicographically by member in Redis. If "who reached the score first wins", encode time into the score: `score * 10^10 + (MAX_TS - timestamp)` (in a float-safe way), or store a composite.
+
+**Scaling beyond one node (billions of players or very high write rates).**
+- **Shard by score range** (0–1K, 1K–10K…): global rank = your rank in your shard + sizes of all higher shards (cheap to count). Hot ranges need splitting.
+- **Shard by user hash:** writes spread evenly, but a global top 10 requires **scatter-gather** (top 10 from each shard, merged). Exact global rank becomes approximate.
+- Often the honest answer: **exact rank for the top (say 10K), approximate percentile for everyone else** ("you're in the top 12%"). Users don't care if they're #1,284,553 or #1,284,601.
+
+**Friends leaderboard.** Fetch friends' scores (`ZMSCORE` on the global set) and sort the small list in the app server, instead of maintaining one sorted set per user.
+
+**Anti-cheat.** Only server-authoritative scores, rate-limit updates, flag impossible jumps.
+
+<Callout type="interview">
+Lead with **Redis sorted sets** and their **O(log N)** operations, keep the **DB as source of truth**, cache the **top N** briefly, use **separate keys per time window with TTL**, and discuss **sharding strategies (score range vs hash) and approximate ranks** for extreme scale. Mention server-authoritative scores for anti-cheat.
+</Callout>
+
+<Takeaways>
+- **Sorted sets** (skip lists) give update, top-N and rank in **O(log N)**.
+- Redis = fast view; **database = source of truth** (rebuildable).
+- Cache the top N for ~1 s; per-window keys with TTL for daily/weekly boards.
+- Extreme scale: **shard by score range** or **hash + scatter-gather**; approximate ranks below the top.
+</Takeaways>
+
+<Quiz
+  id="p-leaderboard"
+  questions={[
+    { q: 'Which Redis structure fits a leaderboard best?', options: ['List', 'Sorted set (ZSET)', 'String', 'HyperLogLog'], answer: 1, explain: 'Sorted by score with O(log N) updates, ranks and ranges.' },
+    { q: 'Why is SELECT COUNT(*) WHERE score > mine a bad way to compute rank at scale?', options: ['It’s not valid SQL', 'It scans/counts many rows on every request; too slow at 100M players and 200K req/s', 'It returns the wrong answer', 'Redis can’t run it'], answer: 1, explain: 'Rank queries must be O(log N), not O(N).' },
+    { q: 'How do you implement a weekly leaderboard that resets?', options: ['Delete all scores every Monday', 'Use a separate key per week (lb:weekly:2026-W44) with a TTL', 'Subtract scores', 'Restart Redis'], answer: 1, explain: 'New window = new key; old keys expire automatically.' },
+    { q: 'Where should score updates come from?', options: ['The player’s app directly', 'Trusted game servers, to prevent cheating', 'Any HTTP client', 'The CDN'], answer: 1, explain: 'Client-reported scores are easy to fake.' },
+  ]}
+/>

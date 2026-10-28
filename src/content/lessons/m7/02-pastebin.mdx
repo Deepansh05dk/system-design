@@ -1,0 +1,138 @@
+---
+title: Design Pastebin
+slug: design-pastebin
+description: Store text snippets and share them by link. Separating metadata from content, object storage, expiry, and caching popular pastes.
+module: m7
+order: 2
+minutes: 18
+difficulty: Easy
+---
+
+<Callout type="problem">
+Users paste text (code, logs, notes), up to a few MB, and get a link like `paste.io/k8Fz2Qa` to share. Pastes can be public or unlisted, and can expire after 10 minutes, a day, or never. It looks like the URL shortener, but now the **content is big**, which changes where it's stored.
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. Create a paste (text, optional title, syntax language, expiry, visibility) → get a unique link.
+2. View a paste by link (raw and syntax-highlighted).
+3. Pastes expire automatically.
+4. *(Stretch)* Users can list/delete their pastes.
+
+**Non-functional**
+- Read-heavy (assume 10:1), low-latency reads, durable until expiry, highly available.
+- Max paste size: 10 MB.
+
+## Step 2: Estimation
+
+- 1M new pastes/day → ~12 writes/sec; 10M reads/day → ~120 reads/sec (peak ~500).
+- Average paste ~10 KB → 10 GB/day → **~3.6 TB/year** of content.
+- Metadata ~200 bytes/paste → 73 GB/year. Small.
+
+**Conclusion:** traffic is modest; the interesting part is **storing lots of text content** cheaply and serving it fast.
+
+## Step 3: API
+
+```http
+POST /api/v1/pastes
+  body: { "content": "...", "title"?: "...", "language"?: "python", "expiresIn"?: "1d", "visibility": "unlisted" }
+  → 201 { "key": "k8Fz2Qa", "url": "https://paste.io/k8Fz2Qa" }
+
+GET /api/v1/pastes/{key}        → 200 { metadata + content }  (404 / 410 Gone if expired)
+GET /raw/{key}                  → text/plain content
+DELETE /api/v1/pastes/{key}     (owner only)
+```
+
+## Step 4: Data model: split metadata and content
+
+<Versus
+  items={[
+    { name: 'Content in the database', icon: '🗄️', pros: ['Simple: one row has everything'], cons: ['Big TEXT columns bloat the DB, backups and replication', 'Expensive storage per GB', 'DB memory wasted caching large blobs'], use: 'Tiny prototypes only.' },
+    { name: 'Metadata in DB, content in object storage', icon: '🪣', pros: ['DB stays small and fast (only ~200 B per paste)', 'S3 is cheap, durable, and scales infinitely', 'Content can be served via CDN'], cons: ['Two systems to write/read', 'Need cleanup of orphaned objects'], use: '<b>The standard answer.</b>' },
+  ]}
+/>
+
+```sql
+pastes (
+  key          VARCHAR(10) PRIMARY KEY,
+  user_id      BIGINT NULL,
+  title        TEXT,
+  language     VARCHAR(30),
+  visibility   VARCHAR(10),   -- public | unlisted | private
+  size_bytes   INT,
+  s3_key       TEXT,          -- e.g. pastes/k8/k8Fz2Qa
+  created_at   TIMESTAMP,
+  expires_at   TIMESTAMP NULL
+)
+-- index: (user_id, created_at) for "my pastes"; (expires_at) for cleanup
+```
+
+Keys are generated like the URL shortener (ID range + base62, or random 7–8 chars with a uniqueness check). For **unlisted** pastes, keys must be **random enough** that nobody can guess them.
+
+## Step 5: High-level design
+
+<ArchFlow
+  title="Pastebin architecture"
+  height={380}
+  nodes={[
+    { id: 'u', label: 'Users', kind: 'user', x: 90, y: 190 },
+    { id: 'lb', label: 'Load balancer', kind: 'lb', x: 270, y: 190 },
+    { id: 'api', label: 'Paste service', kind: 'service', x: 470, y: 190 },
+    { id: 'db', label: 'Metadata DB', sub: 'Postgres', kind: 'db', x: 710, y: 300 },
+    { id: 's3', label: 'Object storage', sub: 'paste content', kind: 'storage', x: 710, y: 80 },
+    { id: 'cache', label: 'Redis', sub: 'hot pastes', kind: 'cache', x: 470, y: 60 },
+    { id: 'cdn', label: 'CDN', sub: '/raw/* public', kind: 'cdn', x: 270, y: 60 },
+    { id: 'gc', label: 'Cleanup worker', sub: 'expired pastes', kind: 'worker', x: 470, y: 330 },
+  ]}
+  edges={[
+    { from: 'u', to: 'lb' },
+    { from: 'lb', to: 'api' },
+    { from: 'api', to: 's3', label: 'PUT content' },
+    { from: 'api', to: 'db', label: 'insert metadata' },
+    { from: 'api', to: 'cache' },
+    { from: 'u', to: 'cdn' },
+    { from: 'cdn', to: 's3', dashed: true },
+    { from: 'gc', to: 'db' },
+    { from: 'gc', to: 's3', dashed: true, curve: -40 },
+  ]}
+  steps={[
+    { title: 'Create', text: 'The service validates size/type, generates a key, uploads the content to S3 (<code>pastes/k8/k8Fz2Qa</code>), then inserts the metadata row. Upload first, then insert: a crash leaves at most an orphaned object, never a row pointing to nothing. (Large pastes could use a pre-signed upload URL.)', add: ['u', 'lb', 'api', 's3', 'db'], flow: ['u>lb', 'lb>api', 'api>s3', 'api>db'] },
+    { title: 'Read: cache first', text: 'Popular pastes (a link shared on Reddit) are served from Redis. Otherwise read metadata from the DB, check expiry/visibility, fetch content from S3, and cache it.', add: ['cache'], flow: ['lb>api', 'api>cache', 'api>db', 'api>s3'] },
+    { title: 'Public raw content via CDN', text: 'Public pastes’ raw content can be served through the CDN with cache headers, offloading most reads. Unlisted/private pastes go through the service for access checks (or short-lived signed URLs).', add: ['cdn'], flow: ['u>cdn', 'cdn>s3'] },
+    { title: 'Expiry and cleanup', text: 'Reads check <code>expires_at</code> and return 410 immediately. A background worker periodically deletes expired metadata rows (using the <code>expires_at</code> index) and their S3 objects. S3 lifecycle rules can also expire objects by prefix/tag.', add: ['gc'], flow: ['gc>db', 'gc>s3'] },
+  ]}
+/>
+
+## Deep dives
+
+**Why check expiry at read time if a job deletes them anyway?** The cleanup job runs every few minutes; a "burn after 10 minutes" paste must stop being readable exactly on time. Lazy check on read = correctness; background job = storage reclamation.
+
+**Deduplication (optional):** many users paste the same stack trace. Store content by **content hash** (`sha256(content)`) so identical pastes share one object. Saves storage; needs reference counting before deleting.
+
+**Rendering:** syntax highlighting can happen **client-side** (Shiki/Prism in the browser) so servers just return raw text. That's simpler and cheaper for the backend.
+
+<Callout type="frontend">
+You'd likely build the viewer: lazy-load the highlighter, virtualize very long pastes (100K lines) so the DOM doesn't explode, and offer "raw" links for huge pastes.
+</Callout>
+
+<Callout type="interview">
+The key insight interviewers look for: **separate metadata (DB) from content (object storage)**, serve public content through a **CDN**, and handle **expiry** both lazily on read and with a background cleanup job. The rest is shared with the URL shortener, so say "key generation works like a URL shortener" and move on.
+</Callout>
+
+<Takeaways>
+- **Metadata in the DB, content in S3**; the DB stays small and fast.
+- Unlisted pastes need **unguessable random keys**.
+- Expiry: **check on read** (exact) + **background cleanup** (storage).
+- Cache hot pastes in Redis; serve public raw content via **CDN**; highlight on the client.
+</Takeaways>
+
+<Quiz
+  id="p-pastebin"
+  questions={[
+    { q: 'Where should paste content (up to 10 MB) be stored?', options: ['In a TEXT column of the main DB', 'In object storage, with metadata in the DB', 'In Redis only', 'In the load balancer'], answer: 1, explain: 'Keeps the database small, cheap and fast; object storage is built for blobs.' },
+    { q: 'A paste set to expire after 10 minutes is still readable at minute 12 because cleanup runs every 5 min. Fix?', options: ['Run cleanup every second', 'Check expires_at on every read and return 410 if expired', 'Never expire pastes', 'Use a CDN'], answer: 1, explain: 'Lazy expiry on read gives exact behavior; cleanup reclaims storage later.' },
+    { q: 'Why upload content to S3 before inserting the metadata row?', options: ['S3 is faster', 'A crash then leaves only an orphaned object, never a row pointing to missing content', 'It’s required by SQL', 'For caching'], answer: 1, explain: 'Order writes so failures leave harmless garbage rather than broken references.' },
+    { q: 'Many users paste identical content. How can you save storage?', options: ['Compress the DB', 'Store objects by content hash so duplicates share one copy', 'Delete duplicates randomly', 'Use shorter keys'], answer: 1, explain: 'Content-addressed storage deduplicates naturally (use reference counts before deleting).' },
+  ]}
+/>

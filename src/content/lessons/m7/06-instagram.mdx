@@ -1,0 +1,143 @@
+---
+title: Design Instagram
+slug: design-instagram
+description: Photo uploads at massive scale. Direct-to-storage uploads, async image processing, CDN delivery, the feed, likes and comments.
+module: m7
+order: 6
+minutes: 26
+difficulty: Medium
+---
+
+<Callout type="problem">
+100 million photos are uploaded to Instagram every day, and billions are viewed. Each photo must be resized into several versions for different screens, delivered fast anywhere in the world, and appear in followers' feeds. How do you build the photo pipeline so that uploads feel instant and viewing is fast on a slow phone connection?
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. Upload a photo with a caption.
+2. Follow users; see a **feed** of photos from people you follow.
+3. Like and comment on photos.
+4. View a user's profile grid.
+*(Out of scope: stories, reels, DMs, search, explore. Mention they'd be separate services.)*
+
+**Non-functional**
+- Uploads must be **reliable** (never lose a photo) and feel fast.
+- Feed and images load **quickly** worldwide (< 200 ms for feed data; images via CDN).
+- **Read-heavy:** ~100 views per upload.
+- Highly available; eventual consistency for feeds/likes is fine.
+
+## Step 2: Estimation
+
+- 500M DAU; 100M uploads/day → **~1,200 uploads/sec** (peak ~3K).
+- Average original photo 2 MB, plus 4 resized versions (~500 KB total) → ~2.5 MB per photo → **250 TB/day** → ~90 PB/year (before replication). This is **object storage + CDN** territory.
+- Views: 100M × 100 = 10B image views/day ≈ **115K image requests/sec**, almost all served by the **CDN**.
+- Metadata per photo ~1 KB → 100 GB/day. Easily handled by a sharded DB.
+
+## Step 3: API
+
+```http
+POST /v1/uploads             { contentType, size }  → { uploadUrl (pre-signed), photoId }
+PUT  <uploadUrl>             (client → object storage directly)
+POST /v1/posts               { photoId, caption }   → 201 { postId }
+GET  /v1/feed?cursor=…       → { posts: [{ id, user, caption, imageUrls{thumb,medium,full}, likeCount, ... }], nextCursor }
+POST /v1/posts/{id}/likes    / DELETE to unlike
+POST /v1/posts/{id}/comments { text }
+GET  /v1/users/{id}/posts?cursor=…
+```
+
+## Step 4: Data model
+
+```sql
+users     (user_id PK, username, bio, avatar_url, follower_count, ...)
+posts     (post_id PK (Snowflake), user_id, caption, status, image_keys, created_at)
+          -- index (user_id, post_id DESC) → profile grid
+follows   (follower_id, followee_id)  + reverse index
+likes     (post_id, user_id, created_at)   PK (post_id, user_id) → no double likes
+comments  (comment_id PK, post_id, user_id, text, created_at)  -- index (post_id, comment_id)
+```
+
+- **Posts / users / follows:** sharded relational DB (Instagram famously ran on **sharded PostgreSQL**) or Cassandra.
+- **Likes and comments:** huge volume, simple access ("by post, newest first") → Cassandra-style wide-column works well; keep `like_count` as a denormalized counter.
+- **Images:** object storage; DB stores only keys.
+
+## Step 5: High-level design
+
+<ArchFlow
+  title="Instagram: upload and view paths"
+  height={460}
+  nodes={[
+    { id: 'm', label: 'Mobile app', kind: 'mobile', x: 80, y: 230 },
+    { id: 'gw', label: 'API gateway', kind: 'gateway', x: 260, y: 230 },
+    { id: 'up', label: 'Upload service', kind: 'service', x: 460, y: 110 },
+    { id: 's3', label: 'Object storage', sub: 'originals + sizes', kind: 'storage', x: 700, y: 40 },
+    { id: 'q', label: 'Queue', sub: 'photo_uploaded', kind: 'queue', x: 700, y: 160 },
+    { id: 'img', label: 'Image workers', sub: 'resize, WebP, strip EXIF', kind: 'worker', x: 900, y: 100 },
+    { id: 'post', label: 'Post service', kind: 'service', x: 460, y: 260 },
+    { id: 'db', label: 'Posts DB', sub: 'sharded', kind: 'db', x: 700, y: 290 },
+    { id: 'feed', label: 'Feed service', sub: 'hybrid fan-out', kind: 'service', x: 460, y: 390 },
+    { id: 'fc', label: 'Feed cache', sub: 'Redis', kind: 'cache', x: 700, y: 410 },
+    { id: 'cdn', label: 'CDN', sub: 'image delivery', kind: 'cdn', x: 260, y: 70 },
+  ]}
+  edges={[
+    { from: 'm', to: 'gw' },
+    { from: 'gw', to: 'up', label: 'get upload URL' },
+    { from: 'm', to: 's3', label: 'PUT bytes (direct)', curve: -90, dashed: true },
+    { from: 's3', to: 'q', label: 'object created' },
+    { from: 'q', to: 'img' },
+    { from: 'img', to: 's3', label: 'write sizes', curve: -30 },
+    { from: 'gw', to: 'post', label: 'create post' },
+    { from: 'post', to: 'db' },
+    { from: 'gw', to: 'feed', label: 'GET feed' },
+    { from: 'feed', to: 'fc' },
+    { from: 'm', to: 'cdn', label: 'GET image' },
+    { from: 'cdn', to: 's3', dashed: true, label: 'miss' },
+  ]}
+  steps={[
+    { title: '1. Ask for an upload URL', text: 'The app asks the upload service for permission. It validates the user/type/size and returns a <b>pre-signed URL</b> plus a <code>photoId</code> (status <code>pending</code>).', add: ['m', 'gw', 'up'], flow: ['m>gw', 'gw>up'] },
+    { title: '2. Upload directly to object storage', text: 'The 2 MB photo goes straight to S3, not through our servers. On flaky mobile networks, use resumable/multipart uploads. Our API servers stay lightweight.', add: ['s3'], flow: ['m>s3'] },
+    { title: '3. Process asynchronously', text: 'The storage event triggers workers that create thumbnail/medium/large versions in modern formats (WebP/AVIF), strip location metadata (privacy!), and run safety checks. Then the photo is marked <code>ready</code>.', add: ['q', 'img'], flow: ['s3>q', 'q>img', 'img>s3'] },
+    { title: '4. Create the post', text: 'The app creates the post (caption + photoId). The post service stores it and publishes an event for feed fan-out (same hybrid approach as the Twitter design).', add: ['post', 'db'], flow: ['gw>post', 'post>db'] },
+    { title: '5. Read the feed', text: 'The feed service returns post metadata from the feed cache: IDs hydrated with captions, counts and <b>CDN image URLs</b> for each size.', add: ['feed', 'fc'], flow: ['gw>feed', 'feed>fc'] },
+    { title: '6. Images come from the CDN', text: 'The app downloads the right size for the screen from the nearest CDN edge. Popular images are always cached at the edge; the origin (S3) rarely sees traffic.', add: ['cdn'], flow: ['m>cdn', 'cdn>s3'] },
+  ]}
+/>
+
+## Deep dives
+
+**Why process images asynchronously?** Resizing takes hundreds of ms of CPU; doing it in the request makes uploads slow and fragile. With a queue, workers scale independently, retries are automatic, and a spike of uploads just queues up. The app can show the local image immediately (**optimistic UI**) while processing finishes.
+
+**Multiple sizes and formats.** A phone showing a 300 px grid tile shouldn't download a 4000 px original. Generate a few fixed sizes (or resize on the fly at the CDN edge with an image service) and let the client choose via `srcset`.
+
+**Feed generation.** Same as the Twitter design: **hybrid fan-out** (push for normal accounts, pull for celebrities), Redis lists of post IDs, cursor pagination. Ranked feed = candidate generation + ML ranking.
+
+**Likes at scale.** A viral post gets thousands of likes per second. Write individual likes to Cassandra (for "did I like this?" and lists), and increment a **sharded counter** in Redis for display, flushing to the DB periodically. The count can be eventually consistent.
+
+**Storage cost.** 90 PB/year is expensive. Use **lifecycle tiers**: old, rarely viewed originals move to infrequent-access storage; keep the commonly served sizes hot.
+
+**Privacy.** Strip EXIF GPS data, use unguessable image URLs (or signed URLs for private accounts), and check permissions in the post service, not the CDN.
+
+<Callout type="frontend">
+Frontend wins here are huge: responsive images with `srcset`/`sizes`, lazy loading below the fold, blur-up placeholders (store a tiny "blurhash" string with each post's metadata), and optimistic upload previews.
+</Callout>
+
+<Callout type="interview">
+Key points: **pre-signed direct uploads**, **async processing pipeline** (queue + workers → multiple sizes), **metadata in a sharded DB vs bytes in object storage**, **CDN** for delivery, and **feed = hybrid fan-out** (reference the Twitter design rather than repeating it). Back it with the **storage numbers** (hundreds of TB/day).
+</Callout>
+
+<Takeaways>
+- Uploads: **pre-signed URL → direct to S3 → event → workers** (resize, formats, strip EXIF) → mark ready.
+- Delivery: **CDN** with multiple sizes; client picks via `srcset`.
+- Metadata in **sharded DB**; likes/comments in a **wide-column store**; counts in **Redis** (sharded counters).
+- Feed = **hybrid fan-out** with cached ID lists; images are by far the biggest storage/bandwidth cost.
+</Takeaways>
+
+<Quiz
+  id="p-instagram"
+  questions={[
+    { q: 'Why shouldn’t photo resizing happen inside the upload request?', options: ['Resizing is impossible on servers', 'It’s slow CPU work; async workers keep uploads fast, scale independently and retry on failure', 'S3 can’t store resized images', 'CDNs do it for free'], answer: 1, explain: 'Decoupling heavy processing via a queue is a core pattern.' },
+    { q: 'What serves ~115K image requests per second?', options: ['The posts database', 'Mostly the CDN edge caches', 'The upload service', 'Redis'], answer: 1, explain: 'Images are static after processing, ideal for CDN caching.' },
+    { q: 'Why generate several image sizes?', options: ['For backups', 'So clients download only what fits their screen, saving bandwidth and time', 'To confuse scrapers', 'S3 requires it'], answer: 1, explain: 'A grid thumbnail needs a fraction of the original’s bytes.' },
+    { q: 'How should a viral post’s like count be handled?', options: ['UPDATE posts SET likes = likes + 1 on one row for every like', 'Sharded counters in Redis, flushed to the DB periodically', 'Count rows in likes on every view', 'Don’t show counts'], answer: 1, explain: 'Spreads write load and keeps reads cheap; small staleness is fine.' },
+  ]}
+/>

@@ -1,0 +1,154 @@
+---
+title: Design Twitter / a News Feed
+slug: design-twitter-news-feed
+description: Post tweets, follow people, read a home timeline. Fan-out on write vs read, the celebrity problem, timeline caches, and ranking.
+module: m7
+order: 5
+minutes: 30
+difficulty: Hard
+---
+
+<Callout type="problem">
+200 million people open Twitter (X) every day and expect their home timeline, the latest posts from everyone they follow, to load **instantly**. Some accounts have 100 million followers. When one of them posts, how do 100 million timelines get updated? And when you open the app, how is "the latest 50 posts from 400 people" assembled in under 200 ms?
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. Post a tweet (text up to 280 chars, optional media).
+2. Follow / unfollow users.
+3. **Home timeline:** recent tweets from people you follow, newest first (ranking as a stretch).
+4. User timeline: one user's own tweets.
+*(Out of scope: search, trends, DMs, notifications. Mention them as separate systems.)*
+
+**Non-functional**
+- **Read-heavy:** timeline reads ≫ posts.
+- Timeline loads in **< 200 ms** p99.
+- **Highly available**; **eventual consistency** is fine: a new tweet can take a few seconds to show up in followers' timelines.
+- Must handle **celebrity accounts** with tens of millions of followers.
+
+## Step 2: Estimation
+
+- 200M DAU, each posts ~2 tweets/day → 400M tweets/day ≈ **~5K writes/sec** (peak ~15K).
+- Each user opens the timeline ~10×/day → 2B timeline reads/day ≈ **~23K reads/sec** (peak ~70K), each returning ~50 tweets.
+- Average follows: ~200; some users have 100M followers.
+- Tweet storage: 400M × ~300 B ≈ 120 GB/day (text + metadata; media separately in S3 + CDN).
+
+**Conclusion:** reads dominate, and reads need data from **many** users. Assembling a timeline on the fly (query 200 users' tweets, merge, sort) at 70K/sec is expensive. → **Precompute timelines.**
+
+## Step 3: API
+
+```http
+POST /v1/tweets                        { text, mediaIds? }       → 201 { tweetId }
+POST /v1/users/{id}/follow             / DELETE to unfollow
+GET  /v1/timeline/home?cursor=…&limit=50   → { tweets: [...], nextCursor }
+GET  /v1/users/{id}/tweets?cursor=…
+```
+
+## Step 4: Data model
+
+```sql
+tweets  (tweet_id BIGINT PK  -- Snowflake: time-sortable
+         user_id, text, media_urls, created_at)
+         -- sharded by tweet_id (or user_id); index (user_id, tweet_id DESC) for user timelines
+follows (follower_id, followee_id, created_at)
+         -- PK (follower_id, followee_id) → "who do I follow"
+         -- + reverse table/index (followee_id, follower_id) → "who follows me" (needed for fan-out)
+users   (user_id PK, name, handle, follower_count, ...)
+
+home_timeline cache (Redis):  timeline:{user_id} → list of the latest ~800 tweet_ids
+```
+
+**Snowflake IDs** for tweets mean sorting by ID = sorting by time, and pagination cursors are just tweet IDs.
+
+## Step 5: The key decision: fan-out
+
+<FanoutSim />
+
+<Versus
+  items={[
+    { name: 'Fan-out on write (push)', icon: '📤', pros: ['Timeline read = 1 Redis lookup → very fast', 'Work happens once per post, not once per read'], cons: ['A celebrity post = millions of writes, delivered late', 'Wasted work for inactive followers'], use: 'Normal users (the vast majority).' },
+    { name: 'Fan-out on read (pull)', icon: '📥', pros: ['Posting is cheap (1 write)', 'No wasted work for inactive users', 'Always up to date'], cons: ['Every timeline read queries hundreds of users and merges → slow and expensive at 70K reads/sec'], use: 'Celebrities’ posts; inactive users.' },
+  ]}
+/>
+
+**Hybrid (what Twitter actually did):** push tweets from normal users into followers' cached timelines; for accounts above a follower threshold, **don't push**. When you open your timeline, fetch your precomputed list **plus** recent tweets from the few celebrities you follow, and merge.
+
+## Step 6: High-level design
+
+<ArchFlow
+  title="News feed architecture"
+  height={440}
+  nodes={[
+    { id: 'u', label: 'Clients', kind: 'mobile', x: 80, y: 220 },
+    { id: 'gw', label: 'LB + API gateway', kind: 'gateway', x: 250, y: 220, w: 160 },
+    { id: 'post', label: 'Tweet service', kind: 'service', x: 460, y: 80 },
+    { id: 'tdb', label: 'Tweet store', sub: 'sharded, Snowflake IDs', kind: 'db', x: 700, y: 40 },
+    { id: 'k', label: 'Kafka', sub: 'tweet_created', kind: 'queue', x: 460, y: 200 },
+    { id: 'fan', label: 'Fan-out workers', kind: 'worker', x: 700, y: 170 },
+    { id: 'graph', label: 'Follow graph', sub: 'who follows whom', kind: 'db', x: 880, y: 100 },
+    { id: 'tl', label: 'Timeline cache', sub: 'Redis lists of IDs', kind: 'cache', x: 700, y: 300 },
+    { id: 'tls', label: 'Timeline service', kind: 'service', x: 460, y: 360 },
+    { id: 'tcache', label: 'Tweet cache', sub: 'id → tweet', kind: 'cache', x: 880, y: 380 },
+  ]}
+  edges={[
+    { from: 'u', to: 'gw' },
+    { from: 'gw', to: 'post', label: 'POST tweet' },
+    { from: 'post', to: 'tdb' },
+    { from: 'post', to: 'k' },
+    { from: 'k', to: 'fan' },
+    { from: 'fan', to: 'graph', label: 'followers?' },
+    { from: 'fan', to: 'tl', label: 'LPUSH id' },
+    { from: 'gw', to: 'tls', label: 'GET timeline' },
+    { from: 'tls', to: 'tl' },
+    { from: 'tls', to: 'tcache', label: 'hydrate' },
+    { from: 'tls', to: 'tdb', label: 'celebrity tweets', curve: -60 },
+  ]}
+  steps={[
+    { title: 'Post a tweet', text: 'The tweet service stores the tweet (Snowflake ID) in the sharded tweet store and returns immediately.', add: ['u', 'gw', 'post', 'tdb'], flow: ['u>gw', 'gw>post', 'post>tdb'] },
+    { title: 'Publish an event', text: 'It publishes <code>tweet_created</code> to Kafka. Everything else happens asynchronously.', add: ['k'], flow: ['post>k'] },
+    { title: 'Fan out to followers', text: 'Fan-out workers look up the author’s followers (paged, from the follow graph) and push the tweet ID onto each follower’s Redis timeline list, trimmed to the latest ~800 IDs. Celebrities (above a threshold) are <b>skipped</b>. Only <b>active</b> users’ timelines are kept in cache.', add: ['fan', 'graph', 'tl'], flow: ['k>fan', 'fan>graph', 'fan>tl'] },
+    { title: 'Read the timeline', text: 'The timeline service reads the user’s list of tweet IDs from Redis (one call), then merges in recent tweets from celebrities they follow (read from the tweet store / cache).', add: ['tls'], flow: ['gw>tls', 'tls>tl', 'tls>tdb'] },
+    { title: 'Hydrate tweets', text: 'IDs are turned into full tweets (text, author, counts) with a multi-get from the tweet cache. Media URLs point to the CDN. Return the first 50 + a cursor.', add: ['tcache'], flow: ['tls>tcache'] },
+  ]}
+/>
+
+## Deep dives
+
+**The celebrity threshold.** If a user follows 5 celebrities, the read path does 1 list read + 5 small "latest tweets of user X" reads (each cached). Cheap. Pushing a 50M-follower tweet would be 50M Redis writes: minutes of delay and huge load. That's why the hybrid wins.
+
+**Inactive users.** Don't maintain cached timelines for people who haven't logged in for 30 days. When they return, **rebuild** their timeline on the fly (pull mode) and start pushing again.
+
+**Timeline storage size.** Store only **IDs** (8 bytes) in timelines, not full tweets: 800 IDs × 8 B × ~100M active users ≈ **640 GB** of Redis. Large but feasible across a cluster (Twitter kept similar timeline caches in Redis).
+
+**Deletes and unfollows.** Deleting a tweet: mark it deleted in the tweet store; hydration filters it out (don't chase it across millions of lists). Unfollow: filter at read time and/or clean the list lazily.
+
+**Ranking (stretch).** Instead of pure time order, fetch a few hundred candidate tweets (from the cached timeline + celebrities + "you might like"), score them with an ML model (engagement predictions), and return the top 50. Candidate generation → ranking → filtering is the standard recommendation pipeline.
+
+**Counts (likes/retweets).** Hot counters → Redis with sharded counters for viral tweets, persisted asynchronously (Module 3: hot keys).
+
+<Callout type="frontend">
+Client-side tricks matter too: **cursor-based infinite scroll**, showing a "**12 new posts**" pill instead of auto-inserting tweets (so the list doesn't jump), optimistic posting, and prefetching the next page. These are great to mention, especially in a frontend system design round (Module 8).
+</Callout>
+
+<Callout type="interview">
+The heart of this question is **fan-out on write vs read**, and the **celebrity problem**. State both options with their costs, propose the **hybrid**, and back it with numbers. Then cover: Redis timelines of **IDs**, **Kafka-driven async fan-out**, **Snowflake IDs** for ordering and cursors, and **eventual consistency** being acceptable.
+</Callout>
+
+<Takeaways>
+- Read-heavy + multi-user reads → **precompute timelines** (fan-out on write) into Redis lists of **tweet IDs**.
+- **Celebrities** break push → **hybrid**: push for normal users, pull celebrities at read time.
+- Post path: **store tweet → Kafka → fan-out workers**; read path: **ID list + merge + hydrate**.
+- Skip inactive users, filter deletes at read time, rank as a separate pipeline.
+</Takeaways>
+
+<Quiz
+  id="p-news-feed"
+  questions={[
+    { q: 'Why is fan-out on write a bad idea for a user with 50M followers?', options: ['Their tweets are longer', 'One post triggers 50M timeline writes, causing huge load and delays', 'It violates CAP', 'Redis can’t store their tweets'], answer: 1, explain: 'The write amplification is enormous. Pull their tweets at read time instead.' },
+    { q: 'What is stored in each user’s cached timeline?', options: ['Full tweet JSON objects', 'Tweet IDs only; tweets are hydrated from a tweet cache', 'Follower lists', 'Images'], answer: 1, explain: 'IDs are small; tweet content lives once in the tweet store/cache.' },
+    { q: 'Why use Snowflake IDs for tweets?', options: ['They are random', 'They are unique, generated without coordination, and sort by time, which also makes good pagination cursors', 'They are shorter than 32 bits', 'They encrypt tweets'], answer: 1, explain: 'Time-sortable IDs make “newest first” and cursors trivial.' },
+    { q: 'A tweet is deleted. What’s the practical approach for millions of cached timelines containing its ID?', options: ['Remove it from every list immediately', 'Mark it deleted; filter it out when hydrating timelines', 'Rebuild all timelines', 'Ignore it'], answer: 1, explain: 'Lazy filtering avoids a massive fan-out of deletes.' },
+    { q: 'Is eventual consistency acceptable for the home timeline?', options: ['No, never', 'Yes, a tweet appearing a few seconds late is fine', 'Only for celebrities', 'Only on weekends'], answer: 1, explain: 'Availability and speed matter more than instant global visibility here.' },
+  ]}
+/>

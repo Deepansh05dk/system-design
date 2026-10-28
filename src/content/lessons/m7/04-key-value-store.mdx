@@ -1,0 +1,132 @@
+---
+title: Design a Distributed Key-Value Store
+slug: design-a-key-value-store
+description: Build your own DynamoDB/Cassandra. Partitioning with consistent hashing, replication, quorums, conflict resolution, and failure handling.
+module: m7
+order: 4
+minutes: 28
+difficulty: Hard
+---
+
+<Callout type="problem">
+Design a key-value store with two operations, `put(key, value)` and `get(key)`, that holds **hundreds of terabytes**, handles **millions of operations per second**, and **keeps working when servers die**. This question tests whether you can combine almost everything from Modules 2 and 3 into one coherent system. It's based on Amazon's famous **Dynamo** paper, which inspired DynamoDB, Cassandra and Riak.
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+- `put(key, value)`, `get(key)`. Values up to ~1 MB. Optional `delete(key)`.
+
+**Non-functional**
+- **Huge scale:** horizontal scaling by adding nodes.
+- **High availability:** always writable, even during failures (shopping cart style), so we lean **AP**.
+- **Tunable consistency:** callers can choose stronger consistency for some operations.
+- **Low latency:** single-digit ms at p99.
+- **Durability:** data must survive node failures.
+
+## Step 2: The core building blocks
+
+| Problem | Technique | Module |
+|---|---|---|
+| Data too big for one machine | **Partitioning** with **consistent hashing** + virtual nodes | 2 |
+| Machines fail | **Replication** to N nodes | 2 |
+| Consistency vs availability | **Quorums**: R + W > N, tunable | 3 |
+| Concurrent writes conflict | **Versioning**: vector clocks or last-write-wins | 3 |
+| Temporary failures | **Sloppy quorum + hinted handoff** | below |
+| Permanent failures / drift | **Anti-entropy with Merkle trees**, read repair | below |
+| Who's alive? | **Gossip protocol** | below |
+| Fast writes on disk | **Commit log + memtable + SSTables (LSM tree)** | 1 |
+
+## Step 3: Partitioning and replication
+
+Keys and nodes live on a **consistent hash ring**. A key is stored on the first node clockwise (its **coordinator**) **and the next N−1 distinct nodes** (N = 3 typically). Virtual nodes keep the load even and spread recovery work.
+
+<HashRing />
+
+## Step 4: Reads and writes with quorums
+
+Any node can receive a client request and act as **coordinator** for that key. It forwards the write to all N replicas and waits for **W** acknowledgements; a read asks replicas and waits for **R** responses, returning the newest version.
+
+<QuorumSim />
+
+Typical settings with N = 3:
+- **W = 2, R = 2:** balanced, read-your-writes via overlap, tolerates 1 node down.
+- **W = 1, R = 1:** fastest and most available; eventual consistency.
+- **W = 3, R = 1:** fast strongly-consistent reads, but writes fail if any replica is down.
+
+## Step 5: The full picture
+
+<ArchFlow
+  title="Key-value store cluster"
+  height={420}
+  nodes={[
+    { id: 'c', label: 'Client', sub: 'smart client / LB', kind: 'client', x: 90, y: 210 },
+    { id: 'n1', label: 'Node A', sub: 'coordinator for k', kind: 'db', x: 340, y: 80 },
+    { id: 'n2', label: 'Node B', sub: 'replica', kind: 'db', x: 600, y: 80 },
+    { id: 'n3', label: 'Node C', sub: 'replica', kind: 'db', x: 600, y: 330 },
+    { id: 'n4', label: 'Node D', sub: 'holds hints', kind: 'db', x: 340, y: 330 },
+  ]}
+  edges={[
+    { from: 'c', to: 'n1', label: 'put(k, v)' },
+    { from: 'n1', to: 'n2', label: 'replicate' },
+    { from: 'n1', to: 'n3', label: 'replicate' },
+    { from: 'n1', to: 'n4', label: 'hinted write', dashed: true },
+    { from: 'n4', to: 'n3', label: 'hand off later', dashed: true },
+    { from: 'n2', to: 'n3', label: 'gossip / Merkle sync', dashed: true, bidir: true, curve: 30 },
+  ]}
+  steps={[
+    { title: 'Client → coordinator', text: 'The client (or a load balancer) sends <code>put(k, v)</code> to the node that owns <code>k</code> on the ring. Smart clients cache the ring and go to the right node directly, saving a hop.', add: ['c', 'n1'], flow: ['c>n1'] },
+    { title: 'Replicate to N nodes, wait for W', text: 'The coordinator writes locally and sends the write to the next replicas on the ring (B, C). With W = 2 it replies “OK” as soon as 2 of the 3 have it.', add: ['n2', 'n3'], flow: ['n1>n2', 'n1>n3'] },
+    { title: 'A replica is down: hinted handoff', text: 'If C is temporarily down, the write goes to the next healthy node D with a <b>hint</b> (“this belongs to C”). This is a <b>sloppy quorum</b>: writes stay available. When C recovers, D hands the data off.', add: ['n4'], flow: ['n1>n4', 'n4>n3'], highlight: ['n4'] },
+    { title: 'Background repair', text: 'Nodes <b>gossip</b> about who’s alive. Replicas compare data efficiently with <b>Merkle trees</b> (hash trees: compare root hashes, descend only into differing branches) and fix differences. Reads also do <b>read repair</b>: if a replica returned an old version, update it.', flow: ['n2>n3'] },
+  ]}
+/>
+
+## Deep dives
+
+### Conflicts: two clients write the same key concurrently
+
+- **Last-write-wins (LWW):** attach a timestamp; highest wins. Simple (Cassandra does this), but concurrent writes silently **lose data**, and clock skew can pick the "wrong" winner.
+- **Vector clocks:** each version carries `{nodeA: 3, nodeB: 1}` counters. If neither version descends from the other, they're **siblings (a conflict)**; return both and let the application merge (Dynamo's shopping cart merged items from both versions).
+- **CRDTs:** data types that merge automatically (counters, sets).
+
+### Failure detection: gossip
+
+Instead of a central monitor (a SPOF), each node periodically tells a few random nodes "here's my heartbeat and what I know about others". Information spreads like a rumor in O(log N) rounds. A node not heard from in a while is suspected down.
+
+### Storage engine on each node (write path)
+
+1. Append to a **commit log** on disk (durability).
+2. Insert into an in-memory sorted **memtable**.
+3. When full, flush it to disk as an immutable sorted **SSTable**.
+4. Reads check the memtable, then SSTables (newest first), using **Bloom filters** to skip SSTables that can't contain the key.
+5. **Compaction** merges SSTables in the background and drops overwritten/deleted values (deletes are written as **tombstones**).
+
+That's an **LSM tree**: sequential writes, very high write throughput.
+
+<Callout type="why" title="Why AP and not CP here?">
+The Dynamo paper's motivation: "add to cart" must **never** fail, even during network problems. A briefly inconsistent cart (merged later) is better than a lost sale. If you're asked for a **strongly consistent** KV store instead (like etcd for config), you'd use a **leader per partition with Raft**, and writes would fail without a majority. Be ready to explain both.
+</Callout>
+
+<Callout type="interview">
+This is a "breadth" question. Walk through the table in Step 2 component by component: **consistent hashing (vnodes) → replication N=3 → quorum R/W → versioning & conflict resolution → hinted handoff → Merkle-tree anti-entropy → gossip → LSM storage**. Name the CAP choice and justify it.
+</Callout>
+
+<Takeaways>
+- Partition with **consistent hashing + virtual nodes**; replicate to the next **N** nodes on the ring.
+- Tune consistency with **quorums (R + W > N)**.
+- Handle conflicts with **LWW** (simple, lossy) or **vector clocks/CRDTs** (merge).
+- Availability under failure: **sloppy quorum + hinted handoff**; repair with **read repair + Merkle trees**; detect failures with **gossip**.
+- Each node stores data in an **LSM tree** (commit log, memtable, SSTables, compaction, Bloom filters).
+</Takeaways>
+
+<Quiz
+  id="p-kv-store"
+  questions={[
+    { q: 'With N = 3, which W/R setting tolerates one node down for both reads and writes while keeping reads up to date?', options: ['W=3, R=3', 'W=2, R=2', 'W=1, R=1', 'W=3, R=1'], answer: 1, explain: '2+2 > 3 gives overlap, and each needs only 2 of 3 replicas.' },
+    { q: 'What is hinted handoff?', options: ['Encrypting writes', 'Temporarily storing a down replica’s write on another node, then handing it over when the replica recovers', 'Electing a leader', 'Compacting SSTables'], answer: 1, explain: 'It keeps writes available during temporary failures.' },
+    { q: 'Why use Merkle trees between replicas?', options: ['To encrypt data', 'To find differing data ranges by comparing hashes, without sending all the data', 'For leader election', 'For load balancing'], answer: 1, explain: 'Compare roots; descend only into branches whose hashes differ.' },
+    { q: 'What is the downside of last-write-wins conflict resolution?', options: ['It’s slow', 'Concurrent writes can be silently lost, and clock skew can choose the wrong winner', 'It needs vector clocks', 'It’s not supported by Cassandra'], answer: 1, explain: 'LWW discards all but one concurrent version.' },
+    { q: 'Why does each node use an LSM tree?', options: ['For better range queries only', 'Sequential appends give very high write throughput', 'It avoids replication', 'It removes the need for Bloom filters'], answer: 1, explain: 'Writes go to a log + memtable, flushed as sorted files: fast sequential I/O.' },
+  ]}
+/>

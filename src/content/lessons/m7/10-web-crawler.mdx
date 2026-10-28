@@ -1,0 +1,121 @@
+---
+title: Design a Web Crawler
+slug: design-a-web-crawler
+description: Download billions of web pages for a search engine. The URL frontier, politeness, deduplication with Bloom filters, and handling a hostile web.
+module: m7
+order: 10
+minutes: 24
+difficulty: Medium
+---
+
+<Callout type="problem">
+To build a search engine you must first **download the web**: billions of pages, refreshed regularly. Start from a few seed URLs, fetch each page, extract its links, add new links to the to-do list, repeat. That's BFS on a graph with billions of nodes, where the "graph" is hostile: servers are slow, some sites are infinite traps, many pages are duplicates, and hammering a small site with 1,000 requests a second is effectively attacking it.
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. Given seed URLs, crawl pages, extract links, and keep discovering new pages.
+2. Store page content for the indexer (search engine).
+3. Re-crawl pages periodically (news sites often, static pages rarely).
+
+**Non-functional**
+- **Scale:** ~1 billion pages per month (and more over time).
+- **Politeness:** respect `robots.txt`; don't overload any single host.
+- **Robustness:** survive bad HTML, timeouts, crawler traps, huge files.
+- **Efficiency:** don't download the same URL or the same content twice.
+- **Extensible:** later add new content types (images, PDFs).
+
+## Step 2: Estimation
+
+- 1B pages/month ≈ **~400 pages/sec** (peak ~800).
+- Average page ~100 KB (HTML) → 100 TB/month of raw content → compressed and stored in object storage; ~1.2 PB/year.
+- Bandwidth: 400 × 100 KB ≈ 40 MB/s ≈ 320 Mbps.
+- URLs seen: tens of billions over time → the "seen URL" set needs a **Bloom filter** or a large KV store.
+
+## Step 3: High-level design
+
+<ArchFlow
+  title="Web crawler pipeline"
+  height={460}
+  nodes={[
+    { id: 'seed', label: 'Seed URLs', kind: 'client', icon: '🌱', x: 90, y: 80 },
+    { id: 'front', label: 'URL frontier', sub: 'priority + per-host queues', kind: 'queue', x: 300, y: 80, w: 170 },
+    { id: 'fetch', label: 'Fetchers', sub: 'HTTP workers', kind: 'worker', x: 540, y: 80 },
+    { id: 'dns', label: 'DNS cache', kind: 'dns', x: 540, y: 220 },
+    { id: 'robots', label: 'robots.txt cache', kind: 'cache', x: 760, y: 220 },
+    { id: 'web', label: 'The web', kind: 'external', x: 760, y: 70 },
+    { id: 'store', label: 'Content store', sub: 'S3 (compressed)', kind: 'storage', x: 920, y: 160 },
+    { id: 'parse', label: 'Parser', sub: 'extract links + text', kind: 'worker', x: 540, y: 360 },
+    { id: 'dedup', label: 'Content dedup', sub: 'hash / simhash', kind: 'cache', x: 760, y: 380 },
+    { id: 'seen', label: 'URL seen?', sub: 'Bloom filter + KV', kind: 'cache', x: 300, y: 300 },
+  ]}
+  edges={[
+    { from: 'seed', to: 'front' },
+    { from: 'front', to: 'fetch', label: 'next URL (per host)' },
+    { from: 'fetch', to: 'dns' },
+    { from: 'fetch', to: 'robots' },
+    { from: 'fetch', to: 'web', label: 'GET page' },
+    { from: 'fetch', to: 'parse' },
+    { from: 'parse', to: 'dedup' },
+    { from: 'dedup', to: 'store', label: 'new content' },
+    { from: 'parse', to: 'seen', label: 'new links' },
+    { from: 'seen', to: 'front', label: 'unseen URLs' },
+  ]}
+  steps={[
+    { title: 'The frontier holds URLs to crawl', text: 'Seeds go into the <b>URL frontier</b>: not a single queue, but a system that decides <i>what</i> to crawl next (priority) and <i>when</i> each host may be contacted (politeness).', add: ['seed', 'front'], flow: ['seed>front'] },
+    { title: 'Fetchers download pages', text: 'Hundreds of fetcher workers take URLs, resolve DNS (cached: DNS lookups are a surprising bottleneck), check <code>robots.txt</code> (cached per host), and download with timeouts and size limits.', add: ['fetch', 'dns', 'robots', 'web'], flow: ['front>fetch', 'fetch>dns', 'fetch>robots', 'fetch>web'] },
+    { title: 'Parse and dedup content', text: 'The parser extracts text and links. Content is hashed; if the same (or nearly the same, via SimHash) content was already stored under another URL, skip it. Mirrors and duplicate pages are very common.', add: ['parse', 'dedup', 'store'], flow: ['fetch>parse', 'parse>dedup', 'dedup>store'] },
+    { title: 'New links → “seen?” check → frontier', text: 'Links are normalized (lowercase host, remove fragments/tracking params) and checked against the seen-URL set. A <b>Bloom filter</b> answers “definitely new” cheaply; only unseen URLs are added to the frontier. The loop continues.', add: ['seen'], flow: ['parse>seen', 'seen>front'] },
+  ]}
+/>
+
+## Deep dives
+
+### The URL frontier: priority + politeness
+
+Two layers of queues:
+1. **Front queues (priority):** a prioritizer scores URLs (PageRank-like importance, how often the page changes, freshness needs) and puts them into high/medium/low queues.
+2. **Back queues (politeness):** one queue **per host**. Each host queue is assigned to one fetcher thread, with a delay between requests (e.g. ≥ 1 s or the `Crawl-delay` from robots.txt). A min-heap of "next allowed fetch time per host" tells workers which host is ready.
+
+This guarantees we never hit `smallblog.com` with 50 parallel requests, while still keeping all workers busy across millions of hosts.
+
+### Deduplication
+
+- **URL dedup:** normalize, then check a **Bloom filter** (fast, memory-efficient, false positive = we skip a page we haven't really seen: acceptable) backed by a distributed KV store for exact checks if needed.
+- **Content dedup:** hash of the content for exact duplicates; **SimHash/MinHash** for near-duplicates (same article with different ads).
+
+### Traps and a hostile web
+
+- **Crawler traps:** infinite calendars (`/calendar?month=…` forever), session IDs in URLs, endlessly deep paths. Limit URL length and depth per host, cap pages per host, detect repeating patterns.
+- **Timeouts and size limits** for slow or huge responses; only fetch content types you handle.
+- **Spam and malware:** reputation scores, skip low-quality hosts.
+
+### Freshness (re-crawling)
+
+Track how often each page changes; re-crawl frequently changing pages (news homepages: minutes) far more often than stable ones (old blog posts: months). Use `ETag`/`Last-Modified` with conditional GETs to avoid re-downloading unchanged pages.
+
+### Scaling out
+
+Partition the frontier **by host** (hash of hostname → crawler node), so politeness for a host is enforced in one place, and DNS/robots caches are local. Crawl nodes can be placed in several regions to fetch sites closer to them.
+
+<Callout type="interview">
+Must mention: **BFS with a URL frontier**, **politeness via per-host queues + robots.txt**, **URL normalization + Bloom filter for "seen"**, **content dedup with hashing**, **trap protection**, **DNS caching**, and **partitioning by host**. Showing you understand the web is hostile (traps, slow servers, duplicates) is the senior-level signal.
+</Callout>
+
+<Takeaways>
+- It's BFS over the web graph, driven by a **URL frontier** that handles **priority** and **politeness**.
+- **Per-host queues + robots.txt + delays** keep the crawler polite.
+- **Bloom filters** for seen URLs; **hashes/SimHash** for duplicate content.
+- Defend against **traps, slow/huge responses**; re-crawl by **change frequency**; **partition by host**.
+</Takeaways>
+
+<Quiz
+  id="p-crawler"
+  questions={[
+    { q: 'How does a crawler avoid overloading a single website?', options: ['Use UDP', 'Per-host queues with delays between requests, respecting robots.txt', 'Crawl only at night', 'Use more fetchers'], answer: 1, explain: 'Politeness is enforced per host, independent of overall crawl speed.' },
+    { q: 'Why use a Bloom filter for the “seen URL” check?', options: ['It never makes mistakes', 'It answers “definitely not seen” using very little memory for billions of URLs', 'It stores page content', 'It sorts URLs'], answer: 1, explain: 'A rare false positive just means skipping one page, an acceptable trade-off.' },
+    { q: 'What is a crawler trap?', options: ['A login page', 'A site structure that generates infinite URLs (e.g. endless calendar pages)', 'A slow DNS server', 'A robots.txt file'], answer: 1, explain: 'Limit depth, URL length and pages per host to escape them.' },
+    { q: 'Why partition crawl work by hostname?', options: ['Hostnames are short', 'Politeness, DNS and robots caching for a host are handled in one place', 'It’s alphabetical', 'For encryption'], answer: 1, explain: 'Keeping a host on one node makes rate control and caching simple.' },
+  ]}
+/>

@@ -1,0 +1,136 @@
+---
+title: Design a Ticket Booking System (BookMyShow / Ticketmaster)
+slug: design-ticket-booking
+description: Sell seats without ever selling one twice, even when 1 million fans arrive at the same second. Seat holds, concurrency control, virtual waiting rooms and payments.
+module: m7
+order: 15
+minutes: 28
+difficulty: Hard
+---
+
+<Callout type="problem">
+A Coldplay concert in Mumbai: 50,000 seats, 3 million fans waiting for 10:00 AM. At 10:00:00, everyone clicks at once. Each seat must be sold **exactly once**. People who pick a seat need a few minutes to pay. Bots try to grab everything. And the site must not crash. **This is the classic concurrency + traffic spike problem.**
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. Browse events/shows and see a **seat map** with availability.
+2. **Select seats and hold them** for a few minutes while paying.
+3. Pay and receive a confirmed booking (ticket).
+4. Unpaid holds expire and seats return to the pool.
+
+**Non-functional**
+- **Correctness above all:** no double booking (strong consistency for seat state).
+- Handle **massive spikes** for popular events (100× normal).
+- Seat map can be slightly stale (seconds); booking cannot.
+- Fairness (first-come-first-served-ish) and bot protection.
+
+## Step 2: Estimation
+
+- Normal day: ~1M bookings/day ≈ 12/sec. Easy.
+- Hot event: 3M users in the first minutes → **hundreds of thousands of requests/sec**, all fighting over **50K rows**.
+
+**Conclusion:** average load is trivial; the design is about **(1) correctness under contention** and **(2) surviving the spike** without melting the database.
+
+## Step 3: Data model
+
+```sql
+events   (event_id, name, venue_id, starts_at, ...)
+seats    (event_id, seat_id, section, row, price,
+          status  -- AVAILABLE | HELD | BOOKED
+          hold_id, held_until, booking_id, version,
+          PRIMARY KEY (event_id, seat_id))
+holds    (hold_id, user_id, event_id, seat_ids[], expires_at, status)
+bookings (booking_id, user_id, event_id, seat_ids[], payment_id, status, created_at)
+```
+
+The `seats` table is the **source of truth** for availability. It needs a database with **strong consistency and transactions** (PostgreSQL/MySQL, or a distributed SQL DB), sharded by `event_id` if needed: one event's seats live together, so a booking transaction stays on one shard.
+
+## Step 4: Booking flow: hold, then pay
+
+<SequenceFlow
+  title="Selecting and booking 2 seats"
+  actors={[
+    { id: 'u', label: 'User', icon: '👤' },
+    { id: 'bk', label: 'Booking service', icon: '🎟️' },
+    { id: 'db', label: 'Seats DB', icon: '🗄️' },
+    { id: 'pay', label: 'Payment gateway', icon: '💳' },
+  ]}
+  messages={[
+    { from: 'u', to: 'bk', label: 'hold seats A12, A13', note: 'User picks seats on the map and clicks “Proceed”.' },
+    { from: 'bk', to: 'db', label: 'UPDATE … SET HELD WHERE status=AVAILABLE', note: 'One transaction: <code>UPDATE seats SET status=\'HELD\', hold_id=?, held_until=now()+10min WHERE event_id=? AND seat_id IN (A12,A13) AND status=\'AVAILABLE\'</code>. If fewer than 2 rows changed, roll back: someone else got one of them.' },
+    { from: 'db', to: 'bk', label: '2 rows updated ✓', dashed: true },
+    { from: 'bk', to: 'u', label: 'held for 10:00 min → pay', dashed: true, note: 'The user sees a countdown timer. Other users now see these seats as unavailable.' },
+    { from: 'u', to: 'pay', label: 'pay ₹9,000 (idempotency key)', note: 'Payment happens with the provider (Razorpay/Stripe). The booking service passes an idempotency key so retries can’t double-charge.' },
+    { from: 'pay', to: 'bk', label: 'webhook: payment succeeded', dashed: true, note: 'The provider confirms asynchronously (webhook), deduplicated by event ID.' },
+    { from: 'bk', to: 'db', label: 'HELD → BOOKED (if hold still valid)', note: 'Transaction: create the booking and mark seats BOOKED <b>only if</b> they’re still held by this hold_id. If the hold expired and seats were resold, refund automatically.' },
+    { from: 'bk', to: 'u', label: '🎉 tickets confirmed', dashed: true },
+  ]}
+/>
+
+Why a **hold** step? Payment takes minutes and can fail. Without holds, either two people pay for the same seat (then one gets a refund and is furious), or seats are locked forever by people who abandon checkout. Holds with **expiry** solve both.
+
+## Step 5: Preventing double booking
+
+<LockingSim />
+
+For seat booking, the cleanest tools are the **atomic conditional update** (`WHERE status='AVAILABLE'`) and a **unique constraint** (one booked row per `(event_id, seat_id)`) as a safety net. Optimistic locking with a `version` column also works. Avoid long-held pessimistic locks during payment: that's what **holds** are for.
+
+**Expiring holds:** a background job (or delayed queue message) releases holds whose `held_until` has passed: `UPDATE seats SET status='AVAILABLE', hold_id=NULL WHERE status='HELD' AND held_until < now()`. Reads also treat expired holds as available.
+
+## Step 6: Surviving the spike
+
+<ArchFlow
+  title="Hot event architecture"
+  height={440}
+  nodes={[
+    { id: 'u', label: '3M fans', kind: 'user', x: 80, y: 220 },
+    { id: 'cdn', label: 'CDN + WAF', sub: 'bots blocked', kind: 'cdn', x: 250, y: 220 },
+    { id: 'wr', label: 'Virtual waiting room', sub: 'queue + tokens', kind: 'queue', icon: '⏳', x: 440, y: 220, w: 160 },
+    { id: 'map', label: 'Seat map service', sub: 'cached availability', kind: 'service', x: 660, y: 100 },
+    { id: 'cache', label: 'Redis', sub: 'availability snapshot', kind: 'cache', x: 880, y: 100 },
+    { id: 'bk', label: 'Booking service', kind: 'service', x: 660, y: 330 },
+    { id: 'db', label: 'Seats DB', sub: 'source of truth', kind: 'db', x: 880, y: 330 },
+  ]}
+  edges={[
+    { from: 'u', to: 'cdn' },
+    { from: 'cdn', to: 'wr' },
+    { from: 'wr', to: 'map', label: 'admitted users' },
+    { from: 'map', to: 'cache' },
+    { from: 'wr', to: 'bk', label: 'admitted users' },
+    { from: 'bk', to: 'db', label: 'conditional updates' },
+    { from: 'db', to: 'cache', label: 'refresh', dashed: true },
+  ]}
+  steps={[
+    { title: 'Absorb and filter at the edge', text: 'Static pages and assets come from the CDN. A WAF + bot detection (CAPTCHA, device fingerprinting, rate limits per account/IP) filters automated traffic.', add: ['u', 'cdn'], flow: ['u>cdn'] },
+    { title: 'Virtual waiting room', text: 'Instead of letting 3M users hit the booking system, put them in a <b>queue</b> (randomized at opening time for fairness) and admit users at a controlled rate, e.g. 2,000/minute, each with a signed time-limited token. Users see “You are #48,213 in line”.', add: ['wr'], flow: ['cdn>wr'] },
+    { title: 'Seat map from cache', text: 'Admitted users load the seat map from a cached availability snapshot (refreshed every second or so). Slightly stale is fine: the booking step re-checks.', add: ['map', 'cache'], flow: ['wr>map', 'map>cache'] },
+    { title: 'Booking hits the DB with conditional updates', text: 'Only admitted users can hold seats. Because admission is rate-controlled, the database sees a manageable number of short transactions on the hot rows. Conflicts return “seat just taken, pick another”.', add: ['bk', 'db'], flow: ['wr>bk', 'bk>db', 'db>cache'] },
+  ]}
+/>
+
+Other spike techniques: **pre-scale** before a known on-sale time, **pre-warm caches**, make the booking path minimal (no non-essential calls), and for general-admission (no seat selection) use a **counter in Redis** (`DECR`) as a fast gate before the DB, or process requests through a queue serially per event.
+
+<Callout type="interview">
+The two halves interviewers want: **(1) correctness:** hold seats with an **atomic conditional update** + **expiry**, confirm on payment with another conditional transition, **unique constraint** as a safety net, idempotent payments; **(2) the spike:** **virtual waiting room**, CDN/WAF/bot protection, cached seat maps, controlled admission rate. Mention that availability shown on the map is eventually consistent but the booking step is strongly consistent.
+</Callout>
+
+<Takeaways>
+- **Hold → pay → confirm**, with holds that **expire** and return seats.
+- Prevent double booking with **atomic conditional updates** (`WHERE status='AVAILABLE'`) + **unique constraints**; keep transactions short.
+- Shard seats **by event** so a booking stays on one shard.
+- Survive spikes with a **virtual waiting room**, CDN/WAF/bot defenses, cached seat maps and pre-scaling.
+- Payments via provider with **idempotency keys** and **webhooks**; refund if a hold expired.
+</Takeaways>
+
+<Quiz
+  id="p-booking"
+  questions={[
+    { q: 'Why hold seats for ~10 minutes instead of booking immediately?', options: ['To annoy users', 'Payment takes time and can fail; holds reserve seats temporarily and release them if unpaid', 'Databases are slow', 'To show ads'], answer: 1, explain: 'Holds with expiry balance fairness and correctness during checkout.' },
+    { q: 'Which statement safely holds a seat?', options: ['SELECT then UPDATE in app code without checks', 'UPDATE seats SET status=HELD WHERE seat_id=? AND status=AVAILABLE, then check rows affected', 'INSERT a new seat row', 'DELETE the seat'], answer: 1, explain: 'The condition makes check-and-set atomic; 0 rows = someone else got it.' },
+    { q: 'What does a virtual waiting room do?', options: ['Shows ads while waiting', 'Queues users and admits them at a controlled rate so the booking system isn’t overwhelmed', 'Speeds up payments', 'Caches seat maps'], answer: 1, explain: 'It turns an unmanageable spike into a steady stream.' },
+    { q: 'Payment succeeded, but the hold expired and the seat was sold to someone else. What should happen?', options: ['Give both users the seat', 'Detect it on confirmation (conditional update fails) and refund automatically', 'Ignore it', 'Cancel the other user’s booking'], answer: 1, explain: 'Confirm only if the hold is still valid; otherwise compensate with a refund.' },
+    { q: 'Why shard the seats table by event_id?', options: ['Events are alphabetical', 'All seats of an event live together, so one booking transaction stays on a single shard', 'To spread one event across all shards', 'For CDN caching'], answer: 1, explain: 'Avoids cross-shard transactions for a booking.' },
+  ]}
+/>

@@ -1,0 +1,135 @@
+---
+title: Design YouTube / Netflix (Video Streaming)
+slug: design-youtube
+description: Upload, transcode and stream video to billions. Chunked uploads, a transcoding DAG, adaptive bitrate streaming (HLS/DASH), and CDNs at the heart of it all.
+module: m7
+order: 11
+minutes: 30
+difficulty: Hard
+---
+
+<Callout type="problem">
+500 hours of video are uploaded to YouTube **every minute**. Viewers watch over a billion hours a day, on everything from a 5G phone to a smart TV to a 2G connection in a village. Video is by far the biggest consumer of internet bandwidth. How do you turn a 4 GB raw upload into something that starts playing within a second on any device, never buffers, and doesn't bankrupt you on bandwidth?
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. Upload videos (up to several GB).
+2. Watch videos on any device / network speed.
+3. *(Supporting)* Video metadata (title, description), view counts, likes, comments, search, recommendations: mention as separate services.
+
+**Non-functional**
+- **Smooth playback:** fast start (< 1–2 s), minimal buffering, quality adapts to the network.
+- **Global scale & low latency** for viewers everywhere.
+- **Durable uploads:** never lose a creator's video.
+- **Cost-efficient:** bandwidth and storage dominate the bill.
+- Upload processing can take minutes (eventual availability is fine).
+
+## Step 2: Estimation
+
+- Uploads: 500 hours/minute ≈ 30,000 minutes of video per minute.
+- 1 minute of video stored in ~6 renditions × ~50 MB average ≈ 300 MB → **~9 TB of new storage per minute** → over 12 PB/day. (These are YouTube-scale numbers; at interview time just show the method.)
+- Viewing: 1B hours/day × ~1 GB/hour (mixed qualities) ≈ **1 EB/day** of egress. Only a massive **CDN** (often inside ISPs' networks) can serve this.
+
+**Conclusion:** two separate problems: an **upload + processing pipeline** (heavy compute, async) and a **delivery** system (bandwidth, CDN, adaptive streaming).
+
+## Step 3: Adaptive bitrate streaming
+
+You don't send "one video file". Each video is encoded into several qualities (**renditions**: 240p … 4K) and cut into **segments** of 2–6 seconds. A **manifest** file (HLS `.m3u8` or DASH `.mpd`) lists all renditions and segment URLs. The player downloads segments one by one and **chooses the quality for each segment** based on measured bandwidth and buffer level.
+
+<AbrSim />
+
+Benefits: playback starts fast (begin at low quality), adapts as the network changes, seeking only fetches the needed segments, and segments are plain HTTP files: **perfect for CDN caching**.
+
+## Step 4: Upload and processing pipeline
+
+<ArchFlow
+  title="Upload → transcode → publish"
+  height={440}
+  nodes={[
+    { id: 'cr', label: 'Creator', kind: 'user', x: 80, y: 120 },
+    { id: 'up', label: 'Upload service', kind: 'service', x: 280, y: 120 },
+    { id: 'raw', label: 'Raw storage', sub: 'S3 originals', kind: 'storage', x: 480, y: 50 },
+    { id: 'meta', label: 'Video metadata', sub: 'status, renditions', kind: 'db', x: 280, y: 300 },
+    { id: 'q', label: 'Job queue', kind: 'queue', x: 480, y: 190 },
+    { id: 'orc', label: 'Workflow orchestrator', sub: 'DAG of tasks', kind: 'service', x: 680, y: 190 },
+    { id: 'tw', label: 'Transcode workers', sub: 'chunk × rendition', kind: 'worker', x: 880, y: 110 },
+    { id: 'out', label: 'Processed storage', sub: 'segments + manifests', kind: 'storage', x: 880, y: 300 },
+    { id: 'cdn', label: 'CDN', kind: 'cdn', x: 680, y: 380 },
+  ]}
+  edges={[
+    { from: 'cr', to: 'up', label: 'init upload' },
+    { from: 'cr', to: 'raw', label: 'resumable multipart', dashed: true, curve: -50 },
+    { from: 'up', to: 'meta' },
+    { from: 'raw', to: 'q', label: 'uploaded' },
+    { from: 'q', to: 'orc' },
+    { from: 'orc', to: 'tw', label: 'tasks' },
+    { from: 'tw', to: 'out' },
+    { from: 'orc', to: 'meta', label: 'status: ready', curve: 40 },
+    { from: 'out', to: 'cdn', label: 'pull / pre-warm' },
+  ]}
+  steps={[
+    { title: 'Resumable upload straight to storage', text: 'The creator’s app gets pre-signed URLs and uploads the file in chunks (resumable: a dropped connection resumes from the last chunk, crucial for multi-GB files). Metadata row: <code>status = uploading</code>.', add: ['cr', 'up', 'raw', 'meta'], flow: ['cr>up', 'cr>raw', 'up>meta'] },
+    { title: 'Kick off processing', text: 'When the upload completes, a job is queued. A <b>workflow orchestrator</b> (Temporal, a custom DAG engine) plans the work.', add: ['q', 'orc'], flow: ['raw>q', 'q>orc'] },
+    { title: 'Transcode in parallel (a DAG)', text: 'The original is <b>split into chunks</b> (e.g. GOP-aligned, a few seconds each). Each chunk × each rendition (240p…4K, codecs H.264/VP9/AV1) is an independent task on a big worker fleet. Plus: thumbnails, audio tracks, captions, content checks (copyright, safety). A 1-hour video finishes in minutes instead of hours.', add: ['tw', 'out'], flow: ['orc>tw', 'tw>out'] },
+    { title: 'Publish', text: 'Segments and manifests are written to storage. Metadata becomes <code>ready</code> with the manifest URL. Popular creators’ videos may be <b>pre-pushed</b> to CDN edges.', add: ['cdn'], flow: ['orc>meta', 'out>cdn'] },
+  ]}
+/>
+
+## Step 5: Watching a video
+
+<SequenceFlow
+  title="Press play"
+  actors={[
+    { id: 'p', label: 'Player', icon: '📺' },
+    { id: 'api', label: 'Video API', icon: '⚙️' },
+    { id: 'cdn', label: 'CDN edge', icon: '🌍' },
+  ]}
+  messages={[
+    { from: 'p', to: 'api', label: 'GET /videos/abc', note: 'Fetch metadata: title, channel, and the <b>manifest URL</b> (plus a signed token if access is restricted).' },
+    { from: 'p', to: 'cdn', label: 'GET master.m3u8', note: 'The manifest lists renditions (bitrate, resolution, codec) and points to per-rendition segment playlists.' },
+    { from: 'p', to: 'cdn', label: 'GET 360p/seg_0001.ts', note: 'Start with a low/medium rendition so playback begins quickly.' },
+    { from: 'p', to: 'cdn', label: 'GET 1080p/seg_0002.ts', note: 'Bandwidth looks good and the buffer is healthy → switch up. Each segment request can pick a different rendition.' },
+    { from: 'p', to: 'api', label: 'POST view / watch-time events', dashed: true, note: 'View counts and watch time go asynchronously to an analytics pipeline (Kafka → stream processing), never blocking playback.' },
+  ]}
+/>
+
+## Deep dives
+
+**The CDN is the system.** Netflix's Open Connect and YouTube's caches put servers **inside ISPs**. Popular content is pre-positioned during off-peak hours; long-tail videos are fetched from regional caches/origin on demand. The 80/20 rule is extreme in video: a small fraction of videos gets most views.
+
+**Cost optimizations.** More efficient codecs (VP9, AV1 save 30–50% bandwidth vs H.264) for popular videos; skip high renditions for videos nobody watches; cheaper storage tiers for old, unpopular content.
+
+**View counts.** Millions of views per minute on a hit video → sharded counters / stream aggregation, eventually consistent ("301 views" freeze in old YouTube was a deliberate verification step).
+
+**Live streaming (follow-up).** Same segments + manifests, but produced in real time from the streamer's feed, with short segments (1–2 s, or low-latency HLS/CMAF chunks) and a few seconds of latency. Chat over WebSockets.
+
+**Metadata and search.** Video metadata in a sharded DB (YouTube used Vitess on MySQL), search in Elasticsearch-style indexes, recommendations from offline ML pipelines.
+
+<Callout type="frontend">
+The browser side: `<video>` + **Media Source Extensions** via players like hls.js / Shaka / dash.js implement the ABR logic you just played with. Prefetching the first segments on hover, poster images and `preload="metadata"` make playback feel instant.
+</Callout>
+
+<Callout type="interview">
+Separate the problem in two: **(1) upload pipeline**: resumable upload to object storage → queue → **parallel transcoding DAG** (chunks × renditions) → segments + manifests → ready; **(2) playback**: **adaptive bitrate (HLS/DASH)** segments served from a **CDN**, with async view analytics. Bandwidth is the cost driver; the CDN is the most important component.
+</Callout>
+
+<Takeaways>
+- Encode each video into **multiple renditions**, split into **short segments**, described by a **manifest** (HLS/DASH).
+- The player does **adaptive bitrate**: pick quality per segment from bandwidth and buffer.
+- Upload: **resumable direct upload → orchestrated, parallel transcoding** (chunk × rendition).
+- Delivery: **CDN everywhere** (even inside ISPs); efficient codecs for popular videos.
+- Views/likes via **async analytics pipelines**.
+</Takeaways>
+
+<Quiz
+  id="p-youtube"
+  questions={[
+    { q: 'Why split videos into short segments in several qualities?', options: ['To save storage', 'So the player can switch quality per segment as network speed changes, and segments cache well on CDNs', 'For copyright reasons', 'Browsers can’t play long files'], answer: 1, explain: 'That is adaptive bitrate streaming (HLS/DASH).' },
+    { q: 'How do you transcode a 1-hour video quickly?', options: ['One giant machine', 'Split it into chunks and transcode chunks × renditions in parallel on many workers', 'Ask the creator to upload all qualities', 'Transcode on the viewer’s device'], answer: 1, explain: 'An orchestrated DAG of parallel tasks turns hours into minutes.' },
+    { q: 'What is the biggest cost driver in a video platform?', options: ['Metadata DB', 'Bandwidth (egress) for delivering video', 'Auth service', 'Search'], answer: 1, explain: 'Hence CDNs, ISP caches and efficient codecs.' },
+    { q: 'Why use resumable/multipart uploads for large videos?', options: ['They’re encrypted', 'A dropped connection can resume from the last chunk instead of restarting a multi-GB upload', 'S3 requires it for small files', 'They’re faster to transcode'], answer: 1, explain: 'Essential on mobile and slow networks.' },
+    { q: 'How should view counts be recorded?', options: ['Synchronously update a DB row before playback starts', 'Send events asynchronously to an analytics pipeline that aggregates them', 'Count CDN logs once a year', 'Don’t track views'], answer: 1, explain: 'Playback must never wait for analytics.' },
+  ]}
+/>

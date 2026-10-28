@@ -1860,3 +1860,151 @@ table.sim-table tr.bad td {
   margin-top: 2px;
   color: var(--text-soft);
 }
+
+/* ---------- Base62 ---------- */
+.b62-result {
+  font-family: var(--mono);
+  font-size: 1.3rem;
+  padding: 0.6rem 0.8rem;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+/* ---------- Fanout ---------- */
+.fo-stage {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 0.7rem;
+  align-items: center;
+}
+.fo-author {
+  text-align: center;
+  font-weight: 700;
+  padding: 0.8rem 0.4rem;
+  border-radius: 12px;
+  border: 2px solid var(--k-client);
+}
+.fo-fans {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.fo-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+.fo-dot.on {
+  background: var(--accent);
+  animation: pop 0.4s ease-out both;
+}
+
+/* ---------- Trie ---------- */
+.trie-path {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.trie-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-faint);
+}
+.trie-sug {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--border);
+  font-size: 0.92rem;
+}
+
+/* ---------- Leaderboard ---------- */
+.lb-rank {
+  display: grid;
+  grid-template-columns: 40px 1fr auto;
+  gap: 0.4rem;
+  padding: 4px 6px;
+  border-radius: 7px;
+  font-size: 0.9rem;
+  transition: background 0.3s;
+}
+.lb-rank.me {
+  background: var(--accent-soft);
+}
+.lb-rank.flash {
+  background: var(--good-soft);
+}
+.lb-pos {
+  font-weight: 700;
+}
+.lb-myrank {
+  font-size: 2rem;
+  font-weight: 850;
+  color: var(--accent-text);
+}
+
+/* ---------- ABR ---------- */
+.abr-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 120px;
+  border-bottom: 1px solid var(--border-strong);
+  margin-top: 6px;
+}
+.abr-col {
+  flex: 0 0 calc(100% / 32 - 2px);
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+}
+.abr-bar {
+  width: 100%;
+  border-radius: 3px 3px 0 0;
+  animation: pop 0.3s ease-out;
+}
+.abr-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  margin-top: 4px;
+}
+
+/* ---------- Chunk sync ---------- */
+.cs-blocks {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 5px;
+}
+.cs-block {
+  border: 1.5px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 4px;
+  text-align: center;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  font-size: 0.75rem;
+}
+.cs-block code {
+  background: none;
+  padding: 0;
+}
+.cs-block.dirty {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+@media (max-width: 600px) {
+  .cs-blocks {
+    grid-template-columns: repeat(4, 1fr);
+  }
+  .fo-stage {
+    grid-template-columns: 1fr;
+  }
+}

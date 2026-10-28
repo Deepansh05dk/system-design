@@ -1,0 +1,156 @@
+---
+title: Design WhatsApp / a Chat System
+slug: design-whatsapp-chat
+description: One-to-one and group messaging in real time. Persistent connections, message routing, delivery receipts, ordering, offline delivery and presence.
+module: m7
+order: 7
+minutes: 30
+difficulty: Hard
+---
+
+<Callout type="problem">
+Two billion users. 100 billion messages a day. A message sent from Mumbai should appear on a phone in Toronto in well under a second, with ✓ (sent), ✓✓ (delivered) and blue ✓✓ (read). If the receiver's phone is off for three days, the message must still arrive, exactly once, in order. And the sender's phone is on a train going through tunnels.
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. 1:1 messaging (text; media as a stretch).
+2. Group chats (up to ~500 members).
+3. Delivery status: sent, delivered, read.
+4. Offline users receive messages when they come back (plus a push notification).
+5. Online / last-seen presence.
+6. Message history synced across a user's devices *(stretch)*.
+
+**Non-functional**
+- **Low latency:** < 500 ms delivery when both are online.
+- **Reliable:** no message lost; no duplicates shown; per-conversation **order preserved**.
+- **Highly available**; huge scale (hundreds of millions of concurrent connections).
+- Security: end-to-end encryption *(mention; the server just relays ciphertext)*.
+
+## Step 2: Estimation
+
+- 500M DAU, ~40 messages/user/day → 20B messages/day ≈ **230K messages/sec** (peak ~700K).
+- Message ~100 bytes + metadata → ~3 TB/day stored (if kept on server).
+- Concurrent connections: ~100M+. At ~100K–500K connections per gateway server → **hundreds of connection servers**.
+
+**Conclusion:** the hard parts are **holding millions of persistent connections**, **routing** messages to whichever server holds the receiver's connection, and **reliable delivery** with ordering, all at very high write volume.
+
+## Step 3: Connection protocol
+
+Clients keep a **persistent WebSocket** (WhatsApp historically used a custom XMPP-like protocol over TCP) to a **chat gateway** server. Server can push instantly; the client sends messages up the same connection. Heartbeats every ~30 s detect dead connections. (Review: Module 4, Real-Time.)
+
+## Step 4: Data model
+
+```text
+messages (Cassandra / ScyllaDB / HBase)
+  partition key: conversation_id
+  clustering key: message_id (time-ordered, e.g. Snowflake / per-conversation sequence)
+  columns: sender_id, body (encrypted), type, created_at
+
+conversations (conversation_id, type: direct|group, members, created_at)
+user_inbox / sync state: (user_id, conversation_id, last_delivered_id, last_read_id)
+sessions (Redis): user_id → { gateway server, device } with TTL refreshed by heartbeats
+```
+
+Why a wide-column store: **massive write volume**, and messages are read "by conversation, newest first" (Module 1: NoSQL types). Discord did exactly this with Cassandra, then ScyllaDB.
+
+## Step 5: Sending a message, end to end
+
+<SequenceFlow
+  title="Asha sends “Lunch?” to Ravi (both online)"
+  actors={[
+    { id: 'a', label: 'Asha’s phone', icon: '📱' },
+    { id: 'g1', label: 'Gateway 1', icon: '🖥️' },
+    { id: 'ms', label: 'Message service', icon: '⚙️' },
+    { id: 'g2', label: 'Gateway 7', icon: '🖥️' },
+    { id: 'r', label: 'Ravi’s phone', icon: '📱' },
+  ]}
+  messages={[
+    { from: 'a', to: 'g1', label: 'send {clientMsgId: c-81, to: ravi, "Lunch?"}', note: 'The app assigns a <b>client message ID</b> (for dedup on retries) and sends over its WebSocket. It shows the message with a clock icon 🕓.' },
+    { from: 'g1', to: 'ms', label: 'persist + route', note: 'The message service assigns a server <code>message_id</code> (ordering within the conversation), writes it to the message store (durable!), and dedups on <code>clientMsgId</code>.' },
+    { from: 'ms', to: 'a', label: 'ACK ✓ (sent)', dashed: true, note: 'Only after the message is safely stored, Asha gets ✓. If the ACK is lost, her app retries with the same clientMsgId and the server dedups.' },
+    { from: 'ms', to: 'g2', label: 'deliver (Ravi is on gateway 7)', note: 'The session store (Redis) says Ravi is connected to gateway 7. The message is routed there (via pub/sub or a direct internal call).' },
+    { from: 'g2', to: 'r', label: 'push "Lunch?"', note: 'Gateway 7 pushes it down Ravi’s WebSocket.' },
+    { from: 'r', to: 'ms', label: 'ACK delivered', dashed: true, note: 'Ravi’s app acknowledges receipt; the server updates <code>last_delivered_id</code>.' },
+    { from: 'ms', to: 'a', label: '✓✓ delivered', dashed: true, note: 'A receipt flows back to Asha. When Ravi opens the chat, a “read” receipt updates it to blue ✓✓ the same way.' },
+  ]}
+/>
+
+## Step 6: Architecture
+
+<ArchFlow
+  title="Chat system architecture"
+  height={440}
+  nodes={[
+    { id: 'a', label: 'Senders', kind: 'mobile', x: 80, y: 120 },
+    { id: 'b', label: 'Receivers', kind: 'mobile', x: 80, y: 340 },
+    { id: 'lb', label: 'L4 load balancer', sub: 'least connections', kind: 'lb', x: 250, y: 230 },
+    { id: 'g1', label: 'Chat gateways', sub: 'WebSocket servers', kind: 'server', x: 440, y: 120 },
+    { id: 'g2', label: 'Chat gateways', sub: '(others)', kind: 'server', x: 440, y: 340 },
+    { id: 'sess', label: 'Session store', sub: 'user → gateway', kind: 'cache', x: 660, y: 40 },
+    { id: 'ms', label: 'Message service', kind: 'service', x: 660, y: 230 },
+    { id: 'db', label: 'Message store', sub: 'Cassandra', kind: 'db', x: 880, y: 160 },
+    { id: 'push', label: 'Push service', sub: 'APNs / FCM', kind: 'external', x: 880, y: 330 },
+    { id: 'grp', label: 'Group service', sub: 'members', kind: 'service', x: 660, y: 410 },
+  ]}
+  edges={[
+    { from: 'a', to: 'lb' },
+    { from: 'b', to: 'lb' },
+    { from: 'lb', to: 'g1' },
+    { from: 'lb', to: 'g2' },
+    { from: 'g1', to: 'sess', label: 'register' },
+    { from: 'g1', to: 'ms' },
+    { from: 'ms', to: 'db', label: 'persist' },
+    { from: 'ms', to: 'sess', label: 'where is user?' },
+    { from: 'ms', to: 'g2', label: 'route' },
+    { from: 'ms', to: 'push', label: 'offline' },
+    { from: 'ms', to: 'grp' },
+  ]}
+  steps={[
+    { title: 'Connect', text: 'Each phone opens a WebSocket through an L4 load balancer to a gateway. The gateway records <code>user → gateway-id</code> in the session store (with a TTL refreshed by heartbeats).', add: ['a', 'b', 'lb', 'g1', 'g2', 'sess'], flow: ['a>lb', 'lb>g1', 'g1>sess'] },
+    { title: 'Persist first', text: 'Incoming messages go to the message service, which writes to the message store <b>before</b> anything else. Durability first, then delivery.', add: ['ms', 'db'], flow: ['g1>ms', 'ms>db'] },
+    { title: 'Route to the receiver’s gateway', text: 'Look up the receiver’s gateway in the session store and forward the message there. Gateways are mostly “dumb pipes”, so they can be restarted and scaled easily.', flow: ['ms>sess', 'ms>g2'] },
+    { title: 'Offline? Push notification', text: 'No session → the message waits in storage, and the push service sends an APNs/FCM notification. When the app reconnects, it <b>syncs</b>: “give me everything after <code>last_delivered_id</code> for each conversation”.', add: ['push'], flow: ['ms>push'] },
+    { title: 'Groups', text: 'For a group message, the group service returns the members; the message is stored <b>once</b> (partitioned by group conversation) and delivered to each online member’s gateway (fan-out on write to ≤ 500 members is fine).', add: ['grp'], flow: ['ms>grp'] },
+  ]}
+/>
+
+## Deep dives
+
+**Ordering.** Global ordering across all chats is impossible and unnecessary. What matters is **per-conversation order**. Give each message a monotonically increasing ID **within its conversation** (assigned by the service owning that conversation's partition), and have clients sort by it. Clients may receive messages out of order over the network and reorder before display.
+
+**Exactly-once (as the user sees it).** The network gives at-least-once. Make it look exactly-once with **client message IDs** (server dedup) + **server message IDs** (client dedup).
+
+**Presence (online / last seen).** Updated by heartbeats into Redis with TTL. Don't broadcast every change to every contact (huge fan-out): send presence only to users who currently have your chat open, or fetch on demand.
+
+**Multi-device sync.** Each device tracks its own `last_synced_id` per conversation and pulls missing messages on connect. The server is the source of truth.
+
+**Media.** Photos/videos are uploaded to object storage (pre-signed URL, encrypted on the client); the message only carries a pointer + decryption key.
+
+**Storage policy.** WhatsApp historically deleted messages from servers once delivered (the phone held history). Many others (Slack, Discord, Messenger) keep history forever. State your choice; it changes storage needs dramatically.
+
+**End-to-end encryption.** With the Signal protocol, clients encrypt with the receiver's keys; servers only see ciphertext and metadata. The server design stays the same, but servers can't search or moderate content.
+
+<Callout type="interview">
+Must-cover points: **persistent WebSocket connections** to gateway servers, a **session store** mapping user → gateway, **persist before deliver**, **ACKs and receipts** (✓ ✓✓), **dedup with client message IDs**, **per-conversation ordering**, **offline sync + push notifications**, and **Cassandra partitioned by conversation**. For groups, discuss fan-out size.
+</Callout>
+
+<Takeaways>
+- Persistent **WebSocket** connections to stateless-ish **gateways**; **session store** maps users to gateways.
+- **Persist first** (wide-column store partitioned by conversation), then route and push.
+- **ACK flow**: sent ✓ after persist, delivered ✓✓ after receiver ACK, read on open.
+- **Client IDs** for dedup; **per-conversation sequence** for ordering.
+- Offline: **store + push notification + sync from last seen ID**.
+</Takeaways>
+
+<Quiz
+  id="p-chat"
+  questions={[
+    { q: 'When should the sender see the single ✓ (sent)?', options: ['As soon as they press send', 'After the server has durably stored the message', 'When the receiver reads it', 'After a push notification'], answer: 1, explain: 'Acknowledging only after persistence guarantees the message won’t be lost.' },
+    { q: 'How does the message service know where to deliver a message for Ravi?', options: ['Broadcast to all gateways', 'Look up Ravi’s current gateway in the session store', 'Ask the DNS', 'Ravi polls every second'], answer: 1, explain: 'A user → gateway mapping (Redis) enables direct routing.' },
+    { q: 'The sender’s app retries a message after a lost ACK. How do we avoid a duplicate?', options: ['Ignore all retries', 'The server deduplicates by the client-generated message ID', 'Use UDP', 'Delete old messages'], answer: 1, explain: 'Same idempotency idea as payments.' },
+    { q: 'What ordering guarantee do chats really need?', options: ['Global order of all messages worldwide', 'Order within each conversation', 'No ordering', 'Alphabetical'], answer: 1, explain: 'Per-conversation sequence IDs are enough and scale well.' },
+    { q: 'Why is Cassandra (or similar) a good fit for messages?', options: ['It supports JOINs', 'Massive write volume and reads by conversation in time order fit partition + clustering keys', 'It’s the only DB with encryption', 'It is single-node'], answer: 1, explain: 'Partition = conversation, clustering = message ID, newest first.' },
+  ]}
+/>

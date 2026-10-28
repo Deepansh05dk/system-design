@@ -1,0 +1,180 @@
+---
+title: Design a URL Shortener (TinyURL / bit.ly)
+slug: design-a-url-shortener
+description: The classic warm-up problem. Short code generation, a read-heavy redirect path, caching, 301 vs 302, and analytics.
+module: m7
+order: 1
+minutes: 25
+difficulty: Easy
+---
+
+<Callout type="problem">
+Users paste a long URL like `https://www.example.com/blog/2026/10/how-we-scaled-our-database?utm_source=newsletter&utm_campaign=oct` and get back `https://sho.rt/aZ3kQ9x`. Anyone who opens the short link is redirected to the long one. It sounds trivial, but it's the most common warm-up question because it touches **ID generation, read-heavy scaling, caching and HTTP details**.
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. Create a short URL for a long URL (optionally with a custom alias).
+2. Visiting the short URL redirects to the original.
+3. Links may have an expiration time.
+4. *(Stretch)* Click analytics: count, referrer, country.
+
+*Out of scope:* user accounts UI, editing links, malware scanning (mention briefly).
+
+**Non-functional**
+- **Very read-heavy:** links are created once and clicked many times (assume 100:1).
+- **Low latency redirects:** < 50 ms at p99 (a slow redirect makes the *target* site feel slow).
+- **Highly available:** if we're down, millions of links on the web break.
+- **Durable:** a created link must never disappear before expiry.
+- Short codes should **not be predictable** in sequence (privacy: people shouldn't enumerate everyone's links).
+
+## Step 2: Estimation
+
+- 100M new URLs per month → 100M ÷ (30 × 86,400) ≈ **40 writes/sec** (peak ~100).
+- 100:1 reads → **~4,000 redirects/sec** (peak ~10K–20K).
+- Storage: one record ≈ 500 bytes (long URL + code + metadata). 100M × 12 × 10 years = 12B records × 500 B ≈ **6 TB** over 10 years.
+- Cache: 20% of links get 80% of clicks. Caching the hottest ~20% of a day's distinct links fits easily in a few GB of memory.
+
+**Conclusion:** writes are tiny, reads are moderate but must be **fast**. The read path (redirect) is where design effort goes: **caching**. The key space for 12B links needs codes of length ≥ 6–7 (next section).
+
+## Step 3: API
+
+```http
+POST /api/v1/urls
+  body: { "longUrl": "https://...", "customAlias": "my-sale"?, "expiresAt": "2027-01-01"? }
+  → 201 { "shortUrl": "https://sho.rt/aZ3kQ9x", "code": "aZ3kQ9x" }
+
+GET /{code}
+  → 302 Found   Location: https://www.example.com/blog/...
+  → 404 if unknown, 410 Gone if expired
+
+GET /api/v1/urls/{code}/stats   (stretch)
+```
+
+## Step 4: Data model
+
+```sql
+urls (
+  code        VARCHAR(10) PRIMARY KEY,   -- the lookup key for redirects
+  long_url    TEXT NOT NULL,
+  user_id     BIGINT NULL,
+  created_at  TIMESTAMP,
+  expires_at  TIMESTAMP NULL
+)
+```
+
+The only hot query is **"get long_url by code"**, a pure key-value lookup. Options:
+- **PostgreSQL/MySQL:** perfectly fine at 6 TB with sharding by `code` later; simple and familiar.
+- **DynamoDB / Cassandra:** natural key-value fit, scales horizontally with no effort.
+
+Either is a good answer if you explain it. Say: "access pattern is single-key lookups, so a key-value store like DynamoDB fits; a sharded Postgres would also work."
+
+## Step 5: Generating the short code
+
+This is the core deep dive. With **base62** (`0-9a-zA-Z`), a 7-character code gives 62⁷ ≈ **3.5 trillion** combinations: plenty.
+
+<Base62Encoder />
+
+### Option A: hash the long URL
+
+`code = base62(md5(longUrl))[0:7]`
+- ❌ Collisions: different URLs can produce the same first 7 characters. Must check the DB and retry with a salt.
+- ❌ Same long URL → same code (sometimes desired, but different users may want separate links/stats).
+
+### Option B: counter + base62 encoding ✅
+
+Get a unique number, then encode it: `id 125,000,000,000 → base62 → "2c3ABnU"`.
+- ✅ No collisions by construction.
+- ❌ Sequential IDs give **predictable** codes (`aZ3kQ9x`, `aZ3kQ9y`, …). Fix: shuffle the ID with a reversible bijection (e.g. multiply by a large prime modulo 62⁷, or encrypt it with a small block cipher) before encoding.
+- Where does the number come from? A single DB counter is a bottleneck/SPOF. Better:
+  - **Range allocation:** a coordinator (ZooKeeper/etcd or a DB row) hands each app server a block of 1,000,000 IDs. The server uses them locally from memory, then asks for another block. One coordination call per million URLs.
+  - **Snowflake-style IDs** (Module 3), then base62 (codes get ~11 chars for 64-bit IDs, a bit long).
+
+### Option C: pre-generated key service
+
+A background job generates random unique codes in advance and stores them in a "unused keys" table; app servers grab batches. Also works; more moving parts.
+
+**Custom aliases:** check availability with a conditional insert (`INSERT ... IF NOT EXISTS` / unique primary key) and return **409 Conflict** if taken.
+
+## Step 6: High-level design
+
+<ArchFlow
+  title="URL shortener architecture"
+  height={400}
+  nodes={[
+    { id: 'u', label: 'Clients', kind: 'user', x: 90, y: 200 },
+    { id: 'cdn', label: 'CDN / edge', sub: 'caches redirects', kind: 'cdn', x: 270, y: 90 },
+    { id: 'lb', label: 'Load balancer', kind: 'lb', x: 270, y: 260 },
+    { id: 'w', label: 'Write API', sub: 'create links', kind: 'service', x: 480, y: 330 },
+    { id: 'r', label: 'Redirect service', sub: 'GET /{code}', kind: 'service', x: 480, y: 190 },
+    { id: 'kgs', label: 'ID range allocator', sub: 'etcd / counter', kind: 'service', icon: '🔢', x: 720, y: 360 },
+    { id: 'cache', label: 'Redis cache', sub: 'code → long URL', kind: 'cache', x: 720, y: 110 },
+    { id: 'db', label: 'URL store', sub: 'DynamoDB / sharded SQL', kind: 'db', x: 720, y: 240 },
+    { id: 'k', label: 'Click events', sub: 'Kafka → analytics', kind: 'queue', x: 480, y: 60 },
+  ]}
+  edges={[
+    { from: 'u', to: 'cdn' },
+    { from: 'u', to: 'lb' },
+    { from: 'cdn', to: 'lb', dashed: true, label: 'miss' },
+    { from: 'lb', to: 'w' },
+    { from: 'lb', to: 'r' },
+    { from: 'w', to: 'kgs', label: 'get ID block' },
+    { from: 'w', to: 'db', label: 'insert' },
+    { from: 'r', to: 'cache' },
+    { from: 'r', to: 'db', label: 'on miss' },
+    { from: 'r', to: 'k', label: 'click event (async)' },
+  ]}
+  steps={[
+    { title: 'Create a short link', text: 'The write API takes the next ID from its locally cached block (refilled from the allocator), shuffles + base62-encodes it, and inserts <code>(code, long_url)</code>. Returns 201 with the short URL.', add: ['u', 'lb', 'w', 'kgs', 'db'], flow: ['u>lb', 'lb>w', 'w>kgs', 'w>db'] },
+    { title: 'Redirect: cache first', text: 'Redirects are ~100× more frequent. The redirect service looks up <code>code</code> in Redis; most hot links are served from memory in ~1 ms and answered with a <b>302</b>.', add: ['r', 'cache'], flow: ['u>lb', 'lb>r', 'r>cache'] },
+    { title: 'Cache miss → database', text: 'On a miss, read the URL store by primary key, write it into the cache (cache-aside, TTL ~24 h), then redirect. Unknown codes return 404 (and can be cached as “not found” to absorb bots).', add: ['db'], flow: ['r>db', 'db>r'] },
+    { title: 'Analytics without slowing redirects', text: 'The redirect service fires a click event (code, time, referrer, country) to Kafka <b>asynchronously</b>. A stream job aggregates counts. The user’s redirect never waits for analytics.', add: ['k'], flow: ['r>k'] },
+    { title: 'Edge caching for viral links', text: 'For extreme traffic, the CDN can cache redirect responses for popular codes for a short time, so the hottest links never reach our servers at all (trade-off: fewer accurate click counts at the origin).', add: ['cdn'], flow: ['u>cdn'] },
+  ]}
+/>
+
+## Step 7: Deep dives
+
+<Callout type="why" title="301 or 302 redirect?">
+- **301 Moved Permanently:** browsers and proxies **cache** the redirect. Later clicks may never reach us → less load, but **we lose analytics** and can't change or expire the link reliably.
+- **302 Found (temporary):** every click comes back to us → accurate analytics, expiry works, more load.
+Most commercial shorteners use **302** (or 307) because analytics are the business. Say which you choose **and why**.
+</Callout>
+
+**Expiry:** check `expires_at` on read (return 410), and run a background job that deletes expired rows and evicts cache entries. Codes from expired links can be reused only if you're careful (old links in emails would suddenly point elsewhere). Usually **don't reuse**.
+
+**Hot links:** a link shared by a celebrity can get 100K clicks/sec. Redis handles it, plus CDN edge caching and per-server local caches for the very hottest keys (Module 3: hot keys).
+
+**Abuse:** rate-limit link creation per user/IP, check long URLs against malware/phishing lists (Google Safe Browsing) asynchronously, and allow takedowns.
+
+**Scaling the store:** 6 TB isn't huge; shard by `code` (hash) if needed. Reads are mostly absorbed by the cache.
+
+## What interviewers ask next
+
+- *"Two servers generate the same code?"* → Impossible with range allocation (non-overlapping blocks). With hashing, rely on the unique primary key + retry.
+- *"The ID allocator dies?"* → Servers still have their current block of IDs; run the allocator on a replicated consensus store (etcd/ZooKeeper) so it fails over.
+- *"Same long URL submitted twice?"* → Either return a new code (simplest, separate stats) or look up by a hash of the long URL to return the existing one (needs a secondary index).
+- *"Multi-region?"* → Redirect service + cache in each region, DB replicated globally (DynamoDB global tables); writes are rare, so async replication is fine.
+
+<Callout type="interview">
+The two things that separate good answers: (1) a clear **code generation** strategy with the collision and predictability trade-offs, and (2) treating the **redirect path as a read-heavy, latency-critical path** with caching and async analytics. Also mention **301 vs 302** unprompted.
+</Callout>
+
+<Takeaways>
+- Read-heavy (100:1): optimize the **redirect path** with **Redis + CDN**, analytics **async** via Kafka.
+- Codes: **unique ID (range allocation) → shuffle → base62**; 7 chars ≈ 3.5 trillion codes.
+- **302** for analytics/expiry, **301** for minimum load.
+- Key-value access pattern → **DynamoDB/Cassandra or sharded SQL** keyed by code.
+</Takeaways>
+
+<Quiz
+  id="p-url-shortener"
+  questions={[
+    { q: 'Roughly how many unique codes does 7-character base62 give?', options: ['~78 billion', '~3.5 trillion', '~10 million', '~62 million'], answer: 1, explain: '62⁷ ≈ 3.52 × 10¹².' },
+    { q: 'Why might you choose 302 over 301 for redirects?', options: ['302 is faster', 'Browsers don’t cache 302 permanently, so every click reaches you for analytics and expiry', '301 is deprecated', '302 uses less bandwidth'], answer: 1, explain: '301 is cached by browsers, so later clicks bypass your servers (no stats, hard to expire).' },
+    { q: 'What’s the main drawback of hashing the long URL (MD5) and taking 7 characters?', options: ['Too slow', 'Collisions are possible, requiring checks and retries', 'Codes are too long', 'It needs a counter'], answer: 1, explain: 'Truncated hashes can collide; you must detect and resolve that.' },
+    { q: 'How do app servers get unique IDs without asking a central DB for every URL?', options: ['Random numbers without checks', 'Each server gets a block (range) of IDs from a coordinator and uses it locally', 'They use the current time only', 'They use the long URL length'], answer: 1, explain: 'One coordination call per block (e.g. 1M IDs) removes the bottleneck.' },
+    { q: 'Why send click events to Kafka asynchronously?', options: ['Kafka is required for redirects', 'So analytics never slow down or break the redirect path', 'To encrypt clicks', 'To generate codes'], answer: 1, explain: 'The user-facing path stays fast; analytics are processed separately.' },
+  ]}
+/>

@@ -1,0 +1,112 @@
+---
+title: Design a Notification System
+slug: design-a-notification-system
+description: Send push, SMS and email notifications reliably at scale. Queues per channel, user preferences, templates, retries, rate limits and deduplication.
+module: m7
+order: 8
+minutes: 22
+difficulty: Medium
+---
+
+<Callout type="problem">
+Your e-commerce company needs to send "Your order has shipped" (push + email), OTP codes (SMS, within seconds!), and a weekly marketing email to 50 million users, through third-party providers like APNs, FCM, Twilio and SendGrid that are sometimes slow or down. Users must never get the same notification three times, must not get marketing at 3 AM, and an OTP must never be stuck behind 50 million marketing emails.
+</Callout>
+
+## Step 1: Requirements
+
+**Functional**
+1. Other services trigger notifications via an API or events: `notify(user, template, data, channels)`.
+2. Channels: **push** (iOS/Android), **SMS**, **email**, **in-app**.
+3. Respect **user preferences** (opt-outs per category/channel) and quiet hours.
+4. **Templates** with personalization and localization.
+5. Track status: sent, delivered, failed, opened *(stretch)*.
+
+**Non-functional**
+- **Reliable:** at-least-once delivery, no notification lost.
+- **No spam:** deduplicate, and rate-limit per user.
+- **Prioritized:** OTPs/security alerts in seconds; marketing can take hours.
+- Scale: e.g. 10M transactional + 50M marketing notifications/day, with big bursts.
+- Third-party providers are slow/flaky → isolate and retry.
+
+## Step 2: High-level design
+
+<ArchFlow
+  title="Notification system"
+  height={460}
+  nodes={[
+    { id: 'svc', label: 'Order / Auth / Marketing', sub: 'producer services', kind: 'service', x: 100, y: 230, w: 170 },
+    { id: 'api', label: 'Notification API', kind: 'service', x: 330, y: 230 },
+    { id: 'pref', label: 'Prefs & devices', sub: 'opt-outs, tokens, quiet hours', kind: 'db', x: 330, y: 80 },
+    { id: 'tpl', label: 'Templates', kind: 'storage', icon: '📝', x: 330, y: 390 },
+    { id: 'qh', label: 'High-priority queues', sub: 'OTP, security', kind: 'queue', x: 560, y: 120 },
+    { id: 'ql', label: 'Bulk queues', sub: 'marketing', kind: 'queue', x: 560, y: 330 },
+    { id: 'wp', label: 'Push workers', kind: 'worker', x: 780, y: 60 },
+    { id: 'ws', label: 'SMS workers', kind: 'worker', x: 780, y: 170 },
+    { id: 'we', label: 'Email workers', kind: 'worker', x: 780, y: 290 },
+    { id: 'ext', label: 'APNs · FCM · Twilio · SES', kind: 'external', x: 950, y: 180, w: 170 },
+    { id: 'log', label: 'Notification log', sub: 'status, dedup', kind: 'db', x: 780, y: 400 },
+  ]}
+  edges={[
+    { from: 'svc', to: 'api', label: 'notify()' },
+    { from: 'api', to: 'pref' },
+    { from: 'api', to: 'tpl' },
+    { from: 'api', to: 'qh' },
+    { from: 'api', to: 'ql' },
+    { from: 'qh', to: 'wp' },
+    { from: 'qh', to: 'ws' },
+    { from: 'ql', to: 'we' },
+    { from: 'wp', to: 'ext' },
+    { from: 'ws', to: 'ext' },
+    { from: 'we', to: 'ext' },
+    { from: 'we', to: 'log', dashed: true },
+  ]}
+  steps={[
+    { title: 'A service asks to notify', text: 'The order service calls <code>notify(user=7, template=order_shipped, data={orderId}, idempotencyKey=ship-991)</code>, or publishes an event the notification system consumes. It doesn’t know about providers or devices.', add: ['svc', 'api'], flow: ['svc>api'] },
+    { title: 'Check preferences, build the message', text: 'Look up the user’s opted-in channels, device tokens, language and quiet hours (cached). Render the template. Drop it if the user opted out, or schedule it for later if it’s quiet hours (except critical alerts).', add: ['pref', 'tpl'], flow: ['api>pref', 'api>tpl'] },
+    { title: 'Enqueue per channel and priority', text: 'Separate queues per <b>channel</b> and <b>priority</b>. An OTP never waits behind a 50M-email campaign, and a slow email provider can’t block push.', add: ['qh', 'ql'], flow: ['api>qh', 'api>ql'] },
+    { title: 'Workers call providers', text: 'Channel workers send to APNs/FCM/Twilio/SES with timeouts, <b>retries with backoff</b>, circuit breakers, and failover to a backup provider (e.g. a second SMS vendor). Permanent failures (invalid token) are recorded, and the token is removed.', add: ['wp', 'ws', 'we', 'ext'], flow: ['qh>wp', 'qh>ws', 'ql>we', 'wp>ext', 'ws>ext', 'we>ext'] },
+    { title: 'Track and deduplicate', text: 'Every attempt is logged with its idempotency key and status. Before sending, workers check the log, so a retried event doesn’t send twice. Provider callbacks (delivered/opened) update the log for analytics.', add: ['log'], flow: ['we>log'] },
+  ]}
+/>
+
+## Deep dives
+
+**Reliability.** Accept the request → persist it (or write to a durable queue like Kafka/SQS) → return 202. Workers ACK the queue message only after the provider accepts it. Messages that keep failing go to a **dead-letter queue** for inspection.
+
+**Deduplication.** Producers may retry `notify()` and queues deliver at least once. Use an **idempotency key** per logical notification, stored in the notification log (or Redis with TTL); skip if already sent. Note: providers themselves don't always guarantee exactly-once, so "almost never a duplicate" is the realistic goal.
+
+**Rate limiting & batching.**
+- Per-user caps: "no more than 3 marketing pushes per day"; collapse bursts ("You have 12 new likes" instead of 12 pushes).
+- Respect **provider rate limits** (e.g. SMS throughput per sender number): workers use token buckets per provider.
+- Big campaigns are **throttled** and spread over hours so they don't starve transactional traffic or overload your own app when millions of users tap the push at once.
+
+**Templates & localization.** Templates stored with versions per language; render with user data at send time. Marketing teams edit templates without engineering deploys.
+
+**Scheduling & time zones.** "Send at 9 AM local time" → a scheduler stores delayed jobs and enqueues them at the right time per time zone.
+
+**In-app notifications.** Store them in a per-user list (Cassandra/DynamoDB, partitioned by user_id) with read/unread state; deliver live over the app's WebSocket/SSE if connected.
+
+<Callout type="why" title="Why separate queues per channel and priority?">
+**Isolation.** If SendGrid slows down, the email queue grows, but push and SMS keep flowing. If marketing enqueues 50M messages, OTPs in the high-priority queue are unaffected. One shared queue would let the slowest channel or biggest campaign delay everything.
+</Callout>
+
+<Callout type="interview">
+Cover: **producer-agnostic API/events**, **preferences + templates**, **separate queues per channel & priority**, **workers with retries/backoff + provider failover**, **idempotency keys + notification log for dedup**, **per-user rate limits/quiet hours**, and **DLQ + monitoring**. Mention that third-party providers are the least reliable part, so design around their failures.
+</Callout>
+
+<Takeaways>
+- Services call a **notification API/events**; the system handles prefs, templates, channels.
+- **Queues per channel and priority** isolate failures and keep OTPs fast.
+- **Retries with backoff, circuit breakers, backup providers, DLQ** for flaky third parties.
+- **Idempotency keys + log** prevent duplicates; **rate limits, batching, quiet hours** prevent spam.
+</Takeaways>
+
+<Quiz
+  id="p-notifications"
+  questions={[
+    { q: 'Why keep OTP SMS in a separate high-priority queue?', options: ['SMS is cheaper', 'So urgent messages aren’t delayed behind bulk marketing traffic', 'Queues can’t mix channels', 'For encryption'], answer: 1, explain: 'Priority isolation keeps time-critical notifications fast.' },
+    { q: 'The order service retries notify() after a timeout. How do you avoid two “shipped” emails?', options: ['Ask users to ignore duplicates', 'Use an idempotency key and check the notification log before sending', 'Disable retries', 'Use UDP'], answer: 1, explain: 'Same idempotency pattern as payments and messages.' },
+    { q: 'APNs returns “invalid device token” for a user. What should happen?', options: ['Retry forever', 'Record the permanent failure and remove/disable that token', 'Send an SMS instead every time', 'Crash the worker'], answer: 1, explain: 'Permanent errors shouldn’t be retried; clean up the bad token.' },
+    { q: 'A campaign must reach 50M users. What protects your system and providers?', options: ['Send everything in one second', 'Throttle the campaign over time with per-provider rate limits', 'Use one shared queue', 'Skip preferences'], answer: 1, explain: 'Throttling avoids provider limits, keeps transactional traffic healthy and spreads the app traffic users generate.' },
+  ]}
+/>
