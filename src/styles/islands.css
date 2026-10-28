@@ -1164,3 +1164,356 @@ table.sim-table tr.bad td {
     grid-template-columns: repeat(4, 1fr);
   }
 }
+
+/* ---------- CapSim ---------- */
+.cap-stage {
+  display: grid;
+  grid-template-columns: 1fr 120px 1fr;
+  gap: 0.6rem;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+.cap-node {
+  border: 2px solid var(--k-server);
+  border-radius: 12px;
+  padding: 0.7rem;
+  background: var(--surface);
+  text-align: center;
+}
+.cap-name {
+  font-weight: 700;
+  font-size: 0.88rem;
+}
+.cap-val {
+  font-size: 1.4rem;
+  font-weight: 800;
+  font-family: var(--mono);
+  margin: 0.3rem 0;
+}
+.cap-link {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--good);
+  position: relative;
+  text-align: center;
+}
+.cap-link span {
+  position: absolute;
+  top: -22px;
+  left: 0;
+  right: 0;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--good);
+}
+.cap-link.cut {
+  background: repeating-linear-gradient(90deg, var(--bad) 0 10px, transparent 10px 22px);
+}
+.cap-link.cut span {
+  color: var(--bad);
+}
+@media (max-width: 640px) {
+  .cap-stage {
+    grid-template-columns: 1fr;
+  }
+  .cap-link {
+    margin: 1.4rem 0 0.6rem;
+  }
+}
+
+/* ---------- QuorumSim ---------- */
+.q-reps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.6rem;
+}
+.q-rep {
+  border: 2px solid var(--k-db);
+  border-radius: 12px;
+  padding: 0.6rem;
+  text-align: center;
+  font-size: 0.85rem;
+  background: var(--surface);
+}
+.q-rep.asked {
+  box-shadow: 0 0 0 3px var(--accent);
+}
+.q-rep.dead {
+  border-color: var(--bad);
+  background: var(--bad-soft);
+  opacity: 0.7;
+}
+
+/* ---------- RateLimiter ---------- */
+.rl-gauge {
+  margin: 0.4rem 0 0.8rem;
+}
+.rl-timeline {
+  position: relative;
+  height: 80px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  overflow: hidden;
+  margin-bottom: 0.4rem;
+}
+.rl-tick {
+  position: absolute;
+  bottom: 2px;
+  transform: translateX(-100%);
+  font-size: 0.68rem;
+  color: var(--text-faint);
+  padding-right: 4px;
+}
+.rl-ev {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  transform: translateX(-50%);
+  transition: left 0.1s linear;
+}
+.rl-ev.ok {
+  background: var(--good);
+}
+.rl-ev.no {
+  background: var(--bad);
+}
+
+/* ---------- Backoff ---------- */
+.bo-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 150px;
+  border-bottom: 1px solid var(--border-strong);
+  padding-top: 6px;
+}
+.bo-col {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+}
+.bo-bar {
+  width: 100%;
+  border-radius: 3px 3px 0 0;
+  transition: height 0.35s;
+}
+.bo-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+}
+
+/* ---------- Circuit breaker ---------- */
+.cb-machine {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+}
+.cb-state {
+  border: 2px solid var(--border);
+  border-radius: 12px;
+  padding: 0.55rem;
+  opacity: 0.5;
+  transition: all 0.2s;
+  background: var(--surface);
+}
+.cb-state.on {
+  opacity: 1;
+  transform: scale(1.02);
+}
+.cb-state.closed.on {
+  border-color: var(--good);
+  background: var(--good-soft);
+}
+.cb-state.open.on {
+  border-color: var(--bad);
+  background: var(--bad-soft);
+}
+.cb-state.half_open.on {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+.cb-events {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  min-height: 26px;
+  margin: 0.4rem 0;
+}
+.cb-ev {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: #fff;
+  animation: pop 0.25s ease-out;
+}
+.cb-ev.ok,
+.cb-ev.probe-ok {
+  background: var(--good);
+}
+.cb-ev.fail,
+.cb-ev.probe-fail {
+  background: var(--bad);
+}
+.cb-ev.fast {
+  background: var(--text-faint);
+}
+@media (max-width: 640px) {
+  .cb-machine {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- Raft ---------- */
+.raft-wrap {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+.raft-svg {
+  width: 100%;
+}
+.raft-hb {
+  animation: dash 0.8s linear infinite;
+}
+@media (max-width: 640px) {
+  .raft-wrap {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- Locking ---------- */
+.lock-lanes {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0.4rem;
+}
+.lock-head {
+  font-weight: 700;
+  text-align: center;
+  font-size: 0.88rem;
+  padding: 0.3rem;
+  border-bottom: 2px solid var(--border);
+}
+.lock-step {
+  grid-column: 1 / 3;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.lock-step.col-Ravi {
+  grid-column: 2 / 4;
+}
+.lock-step.col-DB {
+  grid-column: 1 / 4;
+  text-align: center;
+}
+.lock-step.good {
+  border-color: var(--good);
+  background: var(--good-soft);
+}
+.lock-step.bad {
+  border-color: var(--bad);
+  background: var(--bad-soft);
+}
+.lock-step.warn {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+/* ---------- Snowflake ---------- */
+.sf-bits {
+  display: flex;
+  gap: 3px;
+  overflow-x: auto;
+}
+.sf-part {
+  border: 2px solid;
+  border-radius: 8px;
+  padding: 0.35rem;
+  display: flex;
+  flex-direction: column;
+  min-width: 36px;
+}
+.sf-part code {
+  background: none;
+  padding: 0;
+  font-size: 0.66rem;
+  word-break: break-all;
+}
+
+/* ---------- Bloom ---------- */
+.bf-bits {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 4px;
+}
+.bf-bit {
+  border: 1.5px solid var(--border-strong);
+  border-radius: 7px;
+  text-align: center;
+  padding: 4px 0 2px;
+  font-family: var(--mono);
+  font-weight: 700;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  transition: all 0.2s;
+}
+.bf-bit small {
+  font-size: 0.6rem;
+  color: var(--text-faint);
+  font-weight: 500;
+}
+.bf-bit.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+.bf-bit.hl {
+  box-shadow: 0 0 0 3px var(--warn);
+}
+
+/* ---------- Geo ---------- */
+.geo-wrap {
+  display: grid;
+  grid-template-columns: minmax(240px, 340px) 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+.geo-svg {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  cursor: crosshair;
+}
+@media (max-width: 640px) {
+  .geo-wrap {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- Stampede ---------- */
+.st-dots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+.st-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: var(--bad);
+  animation: pop 0.3s ease-out both;
+}

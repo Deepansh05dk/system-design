@@ -1,0 +1,90 @@
+---
+title: Consensus & Leader Election
+slug: consensus-and-leader-election
+description: How a group of machines agrees on one answer (like who's in charge) even when some of them crash. Raft, majorities, and when you need ZooKeeper or etcd.
+module: m3
+order: 6
+minutes: 14
+---
+
+<Callout type="problem">
+Your database cluster has 5 nodes and one leader. The leader crashes. The other four must pick a new leader. But messages can be delayed or lost, nodes might crash during the election, and **two nodes must never both believe they are the leader** (split brain → conflicting writes → corrupted data). How do machines that can't fully trust the network agree on anything?
+</Callout>
+
+## What consensus means
+
+<Term k="consensus">Consensus</Term> is getting a group of nodes to **agree on a single value** such that:
+- once decided, the decision **never changes**,
+- the system keeps working as long as a **majority** of nodes are alive and can talk.
+
+"The value" can be: who the leader is, the next entry in a replicated log, who holds a lock, the current configuration of a cluster.
+
+## Majorities (quorums) are the key idea
+
+With 5 nodes, a majority is 3. Any two majorities **always overlap** in at least one node. So two different leaders can never both win an election for the same term, because they'd each need 3 votes, and there aren't 6 votes to go around.
+
+| Cluster size | Majority | Failures tolerated |
+|---|---|---|
+| 3 | 2 | 1 |
+| 5 | 3 | 2 |
+| 7 | 4 | 3 |
+
+That's why consensus clusters have an **odd number** of nodes: 4 nodes tolerate only 1 failure, same as 3, but cost more.
+
+## Raft, step by step
+
+<Term k="raft">Raft</Term> was designed to be understandable (unlike its famous predecessor, Paxos). Kill the leader and step through an election:
+
+<RaftSim />
+
+The core rules (simplified):
+1. Time is divided into **terms** (1, 2, 3…). Each term has at most one leader.
+2. The leader sends regular **heartbeats**. Followers that don't hear one within a **random timeout** (e.g. 150–300 ms) become **candidates**, increment the term, vote for themselves and request votes.
+3. Each node votes **once per term**, and only for a candidate whose log is at least as up to date as its own.
+4. A candidate with votes from a **majority** becomes leader.
+5. Writes go to the leader, which replicates them; an entry is **committed** once a majority has it.
+6. If a node sees a higher term, it steps down to follower. This is how an old, partitioned leader is safely demoted.
+
+The random timeouts make it unlikely that two nodes start elections at the same moment; if they do (split vote), they just time out and try again.
+
+## Where you'll meet consensus
+
+You almost never implement Raft yourself. You **use** systems built on it:
+
+- **etcd** (Raft): the brain of Kubernetes, storing cluster state.
+- **ZooKeeper** (ZAB, a Paxos-like protocol): coordination for Kafka (older versions), HBase, Hadoop.
+- **Consul** (Raft): service discovery and configuration.
+- **Kafka KRaft**, **CockroachDB**, **TiDB**, **YugabyteDB** use Raft internally for replication.
+- **Google Spanner / Chubby** use Paxos.
+
+What they're used for in designs:
+- **Leader election:** "only one scheduler instance should run jobs".
+- **Distributed locks** with fencing tokens.
+- **Configuration & service discovery:** a strongly consistent source of truth.
+- **Membership:** which nodes are alive and part of the cluster.
+
+<Callout type="why" title="Why not use consensus for everything?">
+Every write needs a round trip to a majority, so throughput is limited and latency is higher (especially across regions). Consensus stores like etcd hold **small, critical** data (KBs to a few GBs of config, locks, leader info), not your user data. Use them as the **coordinator**, not the database.
+</Callout>
+
+<Callout type="interview">
+When your design needs "exactly one" of something (one leader, one lock holder, one active scheduler), say: "We use **ZooKeeper/etcd** for **leader election**. It uses a consensus protocol (Raft) so a majority must agree, preventing split brain." You don't need to explain Raft fully unless asked, but knowing **majority, terms and heartbeats** lets you answer follow-ups.
+</Callout>
+
+<Takeaways>
+- **Consensus** = nodes agree on one value, safely, despite failures.
+- **Majorities** prevent split brain: two majorities always overlap. Use **odd** cluster sizes (3, 5, 7).
+- **Raft:** terms, heartbeats, random election timeouts, one vote per term, commit on majority.
+- Use **etcd / ZooKeeper / Consul** for leader election, locks and config, not as your main database.
+</Takeaways>
+
+<Quiz
+  id="consensus"
+  questions={[
+    { q: 'A 5-node Raft cluster can keep working with how many failed nodes?', options: ['1', '2', '3', '4'], answer: 1, explain: 'Majority of 5 is 3, so up to 2 nodes can fail.' },
+    { q: 'Why do consensus clusters prefer an odd number of nodes?', options: ['Odd numbers are faster', 'A 4-node cluster tolerates the same failures as a 3-node one (1), so the 4th node adds cost without extra fault tolerance', 'Raft requires it', 'For load balancing'], answer: 1, explain: 'Majority of 4 is 3 → tolerate 1 failure, same as 3 nodes.' },
+    { q: 'Why does Raft use random election timeouts?', options: ['To save energy', 'To make it unlikely that several followers start elections at the same moment and split the vote', 'For security', 'To pick the fastest node'], answer: 1, explain: 'Randomness breaks symmetry so one candidate usually wins quickly.' },
+    { q: 'What should you store in etcd/ZooKeeper?', options: ['All user posts', 'Small, critical coordination data: leader, locks, config', 'Video files', 'Analytics events'], answer: 1, explain: 'They’re built for strongly consistent coordination data, not bulk storage.' },
+    { q: 'How does Raft prevent two leaders in the same term?', options: ['The fastest node wins', 'A candidate needs a majority of votes, and each node votes once per term', 'The admin picks', 'Leaders are fixed forever'], answer: 1, explain: 'Two majorities must overlap, and an overlapping node can’t vote twice in a term.' },
+  ]}
+/>

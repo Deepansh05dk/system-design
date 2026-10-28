@@ -1,0 +1,82 @@
+---
+title: Unique ID Generation
+slug: unique-id-generation
+description: Auto-increment breaks when you have many database shards. UUIDs, ticket servers and Twitter's Snowflake, compared.
+module: m3
+order: 9
+minutes: 12
+---
+
+<Callout type="problem">
+With one database, `id SERIAL` gives you 1, 2, 3… for free. Now you have 16 shards, each with its own counter. Shard 1 creates order #1001, and so does shard 7. **Two orders with the same ID.** How do you generate unique IDs across many machines, quickly, without them all asking one central server?
+</Callout>
+
+## What we usually want from an ID
+
+1. **Unique**, across all machines, forever.
+2. **Fast** to generate, with no bottleneck.
+3. **Roughly sortable by time** (newer IDs are bigger), great for "latest first" feeds and B-tree index performance.
+4. **Compact:** 64 bits fits in a `BIGINT`; 128 bits is bigger to store and index.
+5. Sometimes: **not guessable** (so people can't enumerate `/orders/1001`, `/orders/1002`…).
+
+## The options
+
+| Approach | How | Unique | Sortable | Size | Bottleneck? |
+|---|---|---|---|---|---|
+| **Auto-increment** (one DB) | DB counter | ✅ (one DB only) | ✅ | 64-bit | The single DB |
+| **Auto-increment with offsets** | Shard k uses k, k+N, k+2N… | ✅ | ~ | 64-bit | Hard to add shards |
+| **UUID v4** | 122 random bits | ✅ (practically) | ❌ | 128-bit | None |
+| **UUID v7 / ULID** | Timestamp + random bits | ✅ | ✅ | 128-bit | None |
+| **Ticket server** | Central service hands out IDs (often in blocks) | ✅ | ✅ | 64-bit | Central service (mitigate with batches + 2 servers) |
+| **Snowflake** | Timestamp + machine ID + sequence | ✅ | ✅ | 64-bit | None |
+
+### UUIDs
+
+A random UUID v4 like `9b2c1f6e-...` has so many possible values that collisions are practically impossible. Generate anywhere, no coordination. Downsides: 128 bits, and **random** order means new rows are inserted all over a B-tree index, which hurts write performance and cache locality in big tables. **UUID v7** (standardized in 2024) and **ULID** fix this by putting a timestamp first.
+
+### Twitter Snowflake
+
+<Term k="snowflake">Snowflake</Term> packs everything into **64 bits**:
+
+<SnowflakeGen />
+
+- **41 bits timestamp** (milliseconds since a custom epoch): ~69 years.
+- **10 bits machine** (often 5 datacenter + 5 worker): 1,024 generators.
+- **12 bits sequence:** 4,096 IDs per millisecond per machine (~4 million/sec per machine).
+
+Each server generates IDs **locally**, with no network calls. IDs are **time-ordered**, so sorting by ID ≈ sorting by creation time. Instagram, Discord and many others use variations of this idea.
+
+<Callout type="warn" title="Clock problems">
+Snowflake trusts the machine's clock. If the clock jumps **backwards** (NTP correction), you could generate duplicate IDs. Implementations detect this and wait (or refuse) until time catches up. Machine IDs must also be assigned uniquely (e.g. from ZooKeeper/etcd or config).
+</Callout>
+
+<Callout type="frontend">
+JavaScript numbers are 64-bit floats and are only exact up to 2⁵³. A 64-bit Snowflake ID like `1849302948573839360` **loses precision** if parsed as a number in JS! That's why Twitter's API returns `id_str` as a string. Always send 64-bit IDs to browsers as **strings**.
+</Callout>
+
+## Public IDs vs internal IDs
+
+Sequential IDs leak information (how many orders you have, and let people guess other IDs). A common pattern: use a fast internal ID (BIGINT/Snowflake) for joins and indexes, and a separate **random public ID** or **short code** (e.g. `ord_8fK2xQ`) in URLs.
+
+<Callout type="interview">
+Use this in designs like URL shortener, Twitter, chat (message IDs) or any sharded DB: "IDs come from a **Snowflake-style generator**: 64-bit, time-sortable, generated locally per server, so no central bottleneck. If we don't need 64 bits or sorting, UUID v4 is fine."
+</Callout>
+
+<Takeaways>
+- Auto-increment breaks with multiple writers/shards.
+- **UUID v4:** simplest, no coordination; 128-bit, random order.
+- **UUID v7 / ULID:** time-ordered UUIDs.
+- **Snowflake:** 64-bit = timestamp + machine + sequence; time-sortable, no coordination; watch the clock.
+- Send 64-bit IDs to JavaScript **as strings**.
+</Takeaways>
+
+<Quiz
+  id="unique-ids"
+  questions={[
+    { q: 'Why does auto-increment break with 16 database shards?', options: ['It’s too slow', 'Each shard has its own counter, so IDs collide across shards', 'It uses too much storage', 'It isn’t sortable'], answer: 1, explain: 'Independent counters produce the same numbers on different shards.' },
+    { q: 'What makes Snowflake IDs roughly sortable by time?', options: ['They’re random', 'The timestamp is in the highest bits', 'A central server sorts them', 'They contain a date string'], answer: 1, explain: 'Leading timestamp bits mean later IDs are numerically larger.' },
+    { q: 'What’s a downside of random UUID v4 as a primary key in a large table?', options: ['Collisions are common', 'Random insert positions hurt B-tree index locality and write performance', 'They can’t be generated offline', 'They are only 32 bits'], answer: 1, explain: 'Inserts land all over the index instead of at the end. UUID v7/ULID fix this.' },
+    { q: 'Your frontend shows wrong IDs like 1849302948573839400 instead of ...360. Why?', options: ['Server bug', 'JavaScript numbers lose precision beyond 2^53; send the ID as a string', 'CSS rounding', 'Database corruption'], answer: 1, explain: 'Classic 64-bit ID issue in JS. Use strings (or BigInt).' },
+    { q: 'How many IDs can one Snowflake generator create per millisecond?', options: ['1', '1,024', '4,096', 'Unlimited'], answer: 2, explain: 'The 12-bit sequence gives 2^12 = 4,096 per millisecond per machine.' },
+  ]}
+/>

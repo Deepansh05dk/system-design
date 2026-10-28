@@ -1,0 +1,129 @@
+---
+title: "Distributed Transactions: 2PC & Sagas"
+slug: distributed-transactions
+description: When one business action spans several services or databases, a normal transaction can't help. Two-phase commit, sagas, and the outbox pattern.
+module: m3
+order: 7
+minutes: 16
+---
+
+<Callout type="problem">
+Booking a trip needs three services: **Flights** (reserve a seat), **Hotels** (reserve a room) and **Payments** (charge the card). Each has its own database. If the hotel is full after we already reserved the flight and charged the card, we're in trouble. There's no `BEGIN ... COMMIT` that spans three databases owned by three teams. **How do we keep this all-or-nothing?**
+</Callout>
+
+## Option 1: Two-phase commit (2PC)
+
+A **coordinator** asks every participant to get ready, then tells them all to commit:
+
+<SequenceFlow
+  title="Two-phase commit"
+  actors={[
+    { id: 'co', label: 'Coordinator', icon: '🧑‍✈️' },
+    { id: 'f', label: 'Flights DB', icon: '✈️' },
+    { id: 'h', label: 'Hotels DB', icon: '🏨' },
+    { id: 'p', label: 'Payments DB', icon: '💳' },
+  ]}
+  messages={[
+    { from: 'co', to: 'f', label: 'PREPARE', note: '<b>Phase 1 (prepare / vote):</b> the coordinator asks each participant: “Can you commit this?” Each one does the work, writes it durably, <b>locks</b> the rows, and promises not to change its mind.' },
+    { from: 'co', to: 'h', label: 'PREPARE' },
+    { from: 'co', to: 'p', label: 'PREPARE' },
+    { from: 'f', to: 'co', label: 'YES', dashed: true },
+    { from: 'h', to: 'co', label: 'YES', dashed: true },
+    { from: 'p', to: 'co', label: 'YES', dashed: true, note: 'All voted yes. (If any voted no or timed out, the coordinator would send ABORT to all.)' },
+    { from: 'co', to: 'f', label: 'COMMIT', note: '<b>Phase 2 (commit):</b> the coordinator records the decision, then tells everyone to commit and release locks.' },
+    { from: 'co', to: 'h', label: 'COMMIT' },
+    { from: 'co', to: 'p', label: 'COMMIT', note: 'Problem: if the coordinator crashes after PREPARE but before sending COMMIT, participants are stuck holding locks, unable to decide on their own. 2PC is a <b>blocking</b> protocol.' },
+  ]}
+/>
+
+<Versus
+  items={[
+    { name: '2PC', icon: '🔒', pros: ['True atomicity across databases', 'Strong consistency'], cons: ['Locks held across network round trips → slow, low throughput', 'Coordinator failure can leave participants blocked', 'All participants must support it (XA); rare across microservices / external APIs'], use: 'Inside one system with a few databases that support it, low volume, or inside distributed databases (Spanner uses 2PC + Paxos internally).' },
+  ]}
+/>
+
+## Option 2: Sagas
+
+A <Term k="saga">saga</Term> splits the big transaction into a **sequence of local transactions**, one per service. Each step has a **compensating action** that undoes it. If a step fails, run the compensations for the steps that already succeeded, in reverse.
+
+| Step | Action | Compensation |
+|---|---|---|
+| 1 | Reserve flight seat | Release seat |
+| 2 | Reserve hotel room | Release room |
+| 3 | Charge card | Refund card |
+| 4 | Confirm booking | (none, last step) |
+
+If step 3 (payment) fails: refund isn't needed, so **release room → release seat**. The system ends up consistent, just not instantly: for a moment, a seat was reserved for a booking that didn't happen.
+
+<ArchFlow
+  title="Orchestrated saga: hotel step fails"
+  height={320}
+  nodes={[
+    { id: 'o', label: 'Booking orchestrator', sub: 'saga state machine', kind: 'service', x: 140, y: 160, w: 180 },
+    { id: 'f', label: 'Flight service', kind: 'service', x: 520, y: 60 },
+    { id: 'h', label: 'Hotel service', kind: 'service', x: 520, y: 160 },
+    { id: 'p', label: 'Payment service', kind: 'service', x: 520, y: 260 },
+  ]}
+  edges={[
+    { from: 'o', to: 'f', label: 'reserve / release' },
+    { from: 'o', to: 'h', label: 'reserve' },
+    { from: 'o', to: 'p', label: 'charge / refund' },
+  ]}
+  steps={[
+    { title: 'Step 1: reserve flight ✓', text: 'The orchestrator calls the flight service, which commits a local transaction: seat 12A reserved (status <code>PENDING</code>).', add: ['o', 'f'], flow: ['o>f', 'f>o'] },
+    { title: 'Step 2: charge payment ✓', text: 'Payment is charged in the payment service’s own database. (Order of steps is a design choice: often you do the most likely-to-fail or easiest-to-undo steps first.)', add: ['p'], flow: ['o>p', 'p>o'] },
+    { title: 'Step 3: reserve hotel ✗', text: 'The hotel is full. The hotel step fails, so the saga must <b>compensate</b> the completed steps.', add: ['h'], flow: ['o>h', 'h>o'], highlight: ['h'] },
+    { title: 'Compensate: refund payment', text: 'Run compensations in reverse order. First, refund the card.', flow: ['o>p'] },
+    { title: 'Compensate: release seat', text: 'Then release the flight seat. The system is back to a consistent state. The user sees “Booking failed: hotel unavailable. You have not been charged.”', flow: ['o>f'] },
+  ]}
+/>
+
+### Orchestration vs choreography
+
+- **Orchestration:** a central orchestrator tells each service what to do (above). Easy to understand and monitor. Tools: Temporal, AWS Step Functions, Camunda.
+- **Choreography:** no central brain; each service listens to events and reacts ("FlightReserved" → hotel service reserves → "HotelReserved" → payment charges…). Loosely coupled, but the overall flow is hard to see and debug.
+
+### Saga gotchas
+
+- Compensations must be **idempotent** and **retryable** (they may run more than once).
+- Some actions **can't be undone** (an email was sent). Put them **last**, or design a "semantic" compensation (send a correction email).
+- Users can see **intermediate states** (a seat "pending"). Use statuses like `PENDING → CONFIRMED / CANCELLED` and show them honestly.
+
+## The outbox pattern: "update DB and publish event" safely
+
+Sagas and event-driven systems constantly need to **update the database and publish an event**. Doing them separately is a "dual write": the app might crash between them, so the DB changed but no event was sent (or vice versa).
+
+**Transactional outbox:** in the **same local transaction**, write the business change **and** an "outbox" row describing the event. A separate relay process (or CDC) reads the outbox table and publishes to Kafka, retrying until it succeeds.
+
+```sql
+BEGIN;
+UPDATE orders SET status = 'PAID' WHERE id = 991;
+INSERT INTO outbox (event_type, payload) VALUES ('OrderPaid', '{"orderId": 991}');
+COMMIT;
+-- relay: SELECT unsent rows from outbox → publish to Kafka → mark sent
+```
+
+Now the event is published **if and only if** the transaction committed (at least once, so consumers stay idempotent).
+
+<Callout type="interview">
+In microservice designs with multi-step business flows (bookings, orders, payments), say: "We can't use a single ACID transaction across services, so we use a **saga with compensating actions**, **orchestrated** by a workflow engine like Temporal. Each service publishes events via the **outbox pattern**, and all handlers are **idempotent**." Mention that **2PC** exists but blocks and doesn't fit microservices well.
+</Callout>
+
+<Takeaways>
+- Normal transactions don't span services. Options: **2PC** or **sagas**.
+- **2PC:** prepare + commit; truly atomic but **blocking and slow**; rare in microservices.
+- **Saga:** sequence of local transactions + **compensations** on failure; **eventually consistent**.
+- **Orchestration** (central coordinator) vs **choreography** (events). Orchestration is easier to reason about.
+- Use the **outbox pattern** to update the DB and publish events reliably.
+</Takeaways>
+
+<Quiz
+  id="distributed-tx"
+  questions={[
+    { q: 'What is the main weakness of two-phase commit?', options: ['It’s not atomic', 'It holds locks across network calls and can block if the coordinator fails', 'It only works with NoSQL', 'It loses data'], answer: 1, explain: 'Participants that voted YES must wait for the coordinator’s decision while holding locks.' },
+    { q: 'In a saga, what happens when step 3 of 4 fails?', options: ['Everything is rolled back automatically by the DB', 'Compensating actions undo steps 2 and 1, in reverse order', 'Step 3 is skipped', 'The saga waits forever'], answer: 1, explain: 'Each completed step’s compensation runs to restore consistency.' },
+    { q: 'Which step should usually come LAST in a saga?', options: ['Reserving inventory', 'Sending the confirmation email (hard to undo)', 'Validating input', 'Creating a pending record'], answer: 1, explain: 'Do irreversible actions last, once everything else is confirmed.' },
+    { q: 'What problem does the transactional outbox pattern solve?', options: ['Slow queries', 'Reliably updating the DB AND publishing an event without dual-write inconsistencies', 'Rate limiting', 'Leader election'], answer: 1, explain: 'The event is written in the same transaction as the change, then relayed to the broker.' },
+    { q: 'Orchestration vs choreography: which is easier to monitor and debug?', options: ['Choreography', 'Orchestration', 'They are the same', 'Neither can be monitored'], answer: 1, explain: 'A central orchestrator holds the saga state, so you can see exactly where each flow is.' },
+  ]}
+/>

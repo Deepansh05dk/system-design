@@ -1,0 +1,80 @@
+---
+title: Geospatial Indexing (Geohash & Quadtrees)
+slug: geospatial-indexing
+description: How Uber finds nearby drivers and Zomato finds nearby restaurants in milliseconds. Geohash, quadtrees and the “nearby” query.
+module: m3
+order: 11
+minutes: 14
+---
+
+<Callout type="problem">
+"Show restaurants within 2 km of me." You have 10 million restaurants with latitude and longitude. A normal index on `lat` finds everything in a horizontal **strip** across the whole world, and an index on `lng` finds a vertical strip. You need things that are close in **both** dimensions at once. Computing the distance to all 10 million restaurants per request is far too slow. **How do we index 2D space?**
+</Callout>
+
+## The trick: turn 2D into something 1D indexes understand
+
+Both main techniques **divide the map into cells**, so "nearby" becomes "in my cell or a neighbouring cell", which an ordinary index can answer.
+
+<GeoGrid />
+
+## Geohash
+
+A <Term k="geohash">geohash</Term> encodes a location into a short string by repeatedly splitting the world in half (longitude, then latitude, alternating), writing 0 or 1 each time, and encoding the bits in base32:
+
+| Geohash length | Cell size (roughly) |
+|---|---|
+| 4 (`tdr1`) | ~39 km × 20 km |
+| 5 (`tdr1w`) | ~5 km × 5 km |
+| 6 (`tdr1wx`) | ~1.2 km × 0.6 km |
+| 7 | ~150 m × 150 m |
+
+Key property: **places that share a longer prefix are in the same smaller cell**. So "nearby" is:
+1. Compute the user's geohash at a precision matching the search radius (e.g. 6 chars for ~1 km).
+2. Get that cell **plus its 8 neighbours** (because the user might be right on the edge of a cell).
+3. Query `WHERE geohash IN (9 cells)` or prefix lookups on an indexed geohash column (or in Redis).
+4. Compute exact distances for those candidates and sort.
+
+✅ Simple, works with any database/index, easy to shard by prefix. ❌ Fixed grid: a cell in central Mumbai holds thousands of places while a desert cell holds none. And two points on opposite sides of a cell border can have very different geohashes (that's why we check neighbours).
+
+## Quadtree
+
+A <Term k="quadtree">quadtree</Term> starts with the whole map as one square and **splits a square into 4 whenever it holds too many points**. Dense areas get tiny cells, empty areas stay big. Switch the simulator to "Quadtree" to see it.
+
+✅ Adapts to density: every leaf holds a manageable number of places. ❌ Usually an **in-memory** structure on dedicated servers (rebuilt or updated as places change), more complex to distribute.
+
+## Other options
+
+- **Database support:** PostgreSQL + **PostGIS** (R-tree/GiST indexes), MongoDB `2dsphere`, Elasticsearch geo queries, **Redis GEO** (`GEOADD`, `GEOSEARCH`, built on geohash-like sorted sets). For many systems this is enough: "PostGIS with a GiST index" is a perfectly good interview answer at moderate scale.
+- **Google S2** and **Uber H3**: hierarchical cell systems on a sphere (S2 uses squares, H3 uses **hexagons**: every neighbour is the same distance away, which is nice for things like surge-pricing zones).
+
+## Static vs moving things
+
+| | Restaurants (Yelp) | Drivers (Uber) |
+|---|---|---|
+| Updates | Rare (new restaurant) | Every ~4 seconds per driver! |
+| Reads | Many | Many |
+| Good fit | Geohash index in DB / quadtree built periodically | **In-memory** index (Redis GEO, H3 cells in memory), updated constantly; old locations expire |
+
+Millions of drivers × an update every few seconds = hundreds of thousands of writes per second. You **don't** write those to a relational database's B-tree. You keep current locations **in memory**, keyed by cell, and persist the history asynchronously (for trips and analytics).
+
+<Callout type="interview">
+For "Design Yelp / nearby restaurants": "**Geohash** (or PostGIS) index; search the user's cell + 8 neighbours at a precision based on radius, then filter by exact distance and rank." For "Design Uber": "Driver locations live **in memory** (Redis GEO or an H3-cell → drivers map), updated every few seconds over a persistent connection; a matching service queries nearby cells." Full walkthroughs in Module 7.
+</Callout>
+
+<Takeaways>
+- Normal 1D indexes can't answer 2D "nearby" queries efficiently.
+- **Geohash:** fixed grid → string; shared prefix ≈ nearby; search **cell + 8 neighbours**.
+- **Quadtree:** adaptive cells that split where dense; usually in memory.
+- Off-the-shelf: **PostGIS, Redis GEO, Elasticsearch, S2, H3**.
+- Fast-moving objects (drivers) → **in-memory** location index; static places → DB index.
+</Takeaways>
+
+<Quiz
+  id="geo"
+  questions={[
+    { q: 'Why do we search the user’s geohash cell AND its 8 neighbours?', options: ['To find more results for fun', 'A nearby place may be just across a cell border with a different geohash', 'Geohash requires 9 cells', 'For caching'], answer: 1, explain: 'Edge cases: close points can fall in adjacent cells.' },
+    { q: 'What does a longer shared geohash prefix mean?', options: ['The places are farther apart', 'The places are in the same smaller cell (closer)', 'Nothing', 'They are in the same country only'], answer: 1, explain: 'Each extra character narrows the cell.' },
+    { q: 'What is the main advantage of a quadtree over a fixed geohash grid?', options: ['It’s stored in SQL', 'It adapts cell size to density', 'It is always smaller', 'It needs no memory'], answer: 1, explain: 'Dense areas split into small cells; sparse areas stay large.' },
+    { q: 'Uber drivers send locations every 4 seconds. Where should current locations live?', options: ['A relational DB with a B-tree index on lat', 'An in-memory geo index (e.g. Redis GEO / cell map), with history persisted asynchronously', 'Object storage', 'A data warehouse'], answer: 1, explain: 'Very high update rate + low-latency reads → memory. Persist trip history separately.' },
+  ]}
+/>

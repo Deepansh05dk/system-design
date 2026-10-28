@@ -1,0 +1,86 @@
+---
+title: The CAP Theorem (and PACELC)
+slug: cap-theorem
+description: When the network breaks, a distributed system must choose between being correct and being available. Learn what CAP really says, and what it doesn't.
+module: m3
+order: 1
+minutes: 14
+---
+
+<Callout type="problem">
+Your database has copies in Mumbai and Frankfurt. The undersea cable between them is cut. A user in Mumbai updates their address; a moment later, a user in Frankfurt reads it. Frankfurt has no way to know about the update. **Should Frankfurt answer with possibly-old data, or refuse to answer at all?** There's no third option.
+</Callout>
+
+## The three letters
+
+The <Term k="cap">CAP theorem</Term> (Eric Brewer, 2000) talks about three properties of a distributed data store:
+
+- **C, Consistency:** every read sees the **latest** write (as if there were only one copy). *Note: this is not the "C" in ACID.*
+- **A, Availability:** every request to a non-failed node gets a **response** (not an error), even if it's not the latest data.
+- **P, Partition tolerance:** the system keeps working even when the network **splits** into groups that can't talk to each other.
+
+The famous slogan is "pick 2 of 3". That's misleading. Here's the accurate version:
+
+> In a distributed system, **network partitions will happen** (cables get cut, switches fail, cloud zones lose connectivity). So P is not optional. **During a partition, you must choose between C and A.**
+
+When there's no partition, you can have both C and A.
+
+## Try it
+
+<CapSim />
+
+## CP vs AP
+
+<Versus
+  items={[
+    { name: 'CP: choose Consistency', icon: '🛡️', pros: ['Never returns wrong/stale data', 'Simple to reason about: "what you read is true"'], cons: ['Some requests fail or hang during partitions', 'Lower availability'], use: 'Money, inventory counts, seat bookings, leader election, locks, config. Examples: traditional RDBMS with sync replication, HBase, MongoDB (default settings), etcd, ZooKeeper, Spanner.' },
+    { name: 'AP: choose Availability', icon: '🌐', pros: ['Always answers, even during partitions', 'Lower latency, works across regions'], cons: ['May return stale data', 'Conflicting writes must be merged later'], use: 'Social feeds, likes, view counts, shopping carts, DNS, product catalogs. Examples: Cassandra, DynamoDB (default), CouchDB, Riak.' },
+  ]}
+/>
+
+<Callout type="analogy">
+Two bank branches lose their phone line. A customer asks Branch B for their balance. **CP branch:** "Sorry, our system is down, come back later." **AP branch:** "Here's the balance as of this morning." Which is right depends on whether you're **withdrawing cash** (better be CP) or just **checking roughly** (AP is fine).
+</Callout>
+
+It's not all-or-nothing per system. A good design picks **per feature**: an e-commerce site can be AP for the product catalog and reviews, and CP for checkout and inventory.
+
+## PACELC: what about when nothing is broken?
+
+CAP only talks about partitions, which are rare. **PACELC** (Daniel Abadi) adds the everyday trade-off:
+
+> **If P**artition → choose **A** or **C**. **E**lse (normal operation) → choose **L**atency or **C**onsistency.
+
+Even with a perfect network, keeping copies strongly consistent means **waiting** for other replicas to confirm (sometimes across continents). So you trade latency for consistency **all the time**, not just during failures.
+
+| System | During partition | Normally | Label |
+|---|---|---|---|
+| Cassandra / DynamoDB (default) | Availability | Latency | PA/EL |
+| Spanner / CockroachDB | Consistency | Consistency | PC/EC |
+
+Many databases are **tunable**: Cassandra lets you choose consistency per query (ONE, QUORUM, ALL), which moves you along this spectrum. Next lesson.
+
+<Callout type="mistake">
+"My system is CA." In a distributed system that's not a real option, because partitions happen whether you like it or not. A single-node database is "CA" only because it isn't distributed. In interviews, talk about **CP vs AP during partitions** and **latency vs consistency** normally.
+</Callout>
+
+<Callout type="interview">
+Use CAP to justify choices per feature: "**Seat inventory must be CP.** If we can't confirm with the primary, we'd rather show an error than double-book. **The news feed is AP.** Showing a post a few seconds late is fine, and availability matters more." Interviewers love hearing the trade-off named explicitly.
+</Callout>
+
+<Takeaways>
+- **CAP:** during a network **partition**, a distributed system must give up either **Consistency** or **Availability**.
+- **P is not optional** in distributed systems, so the real choice is **CP vs AP** (when partitioned).
+- **PACELC:** even without partitions, there's a constant **latency vs consistency** trade-off.
+- Choose **per feature**: money/inventory → CP; feeds/likes/catalogs → AP.
+</Takeaways>
+
+<Quiz
+  id="cap"
+  questions={[
+    { q: 'What does CAP really say?', options: ['You can only ever have 2 of the 3 properties', 'During a network partition, you must choose between consistency and availability', 'Consistency is always more important', 'Partitions never happen in the cloud'], answer: 1, explain: 'Without a partition you can have both C and A. The forced choice happens when the network splits.' },
+    { q: 'A seat-booking system loses contact with its primary database. Which behaviour fits CP?', options: ['Accept bookings locally and sync later', 'Reject booking requests until the primary is reachable', 'Book randomly', 'Show cached seat maps and accept bookings'], answer: 1, explain: 'CP prefers refusing requests over risking incorrect data (double bookings).' },
+    { q: 'Which feature is a good candidate for AP?', options: ['Bank transfer', 'Like counts on posts', 'Inventory of last item', 'Distributed lock'], answer: 1, explain: 'A slightly stale like count harms nobody; staying available matters more.' },
+    { q: 'PACELC adds which trade-off?', options: ['Cost vs performance', 'Latency vs consistency when there is NO partition', 'Security vs speed', 'Storage vs memory'], answer: 1, explain: 'Even in normal operation, stronger consistency means waiting for replicas → higher latency.' },
+    { q: 'Why is “we’ll build a CA distributed system” a weak statement?', options: ['CA is too expensive', 'Partitions will happen in any distributed system, so you can’t opt out of P', 'CA is only for NoSQL', 'It’s actually the best choice'], answer: 1, explain: 'In a real network, partitions are a fact. You choose how to behave when they happen.' },
+  ]}
+/>

@@ -1,0 +1,96 @@
+---
+title: Rate Limiting
+slug: rate-limiting
+description: Protect your system from abuse and overload. Token bucket, leaky bucket, fixed and sliding windows, and where to put the limiter.
+module: m3
+order: 3
+minutes: 15
+---
+
+<Callout type="problem">
+A bug in a customer's script calls your API 50,000 times per second. Or a bot tries a million passwords on your login page. Or one big customer's traffic spike slows down everyone else. **How do you make sure no single client can hurt your system or other users?**
+</Callout>
+
+<Term k="rate-limiting">Rate limiting</Term> caps how many requests a client can make in a time period. Extra requests are rejected with **HTTP 429 Too Many Requests** (often with a `Retry-After` header).
+
+Why rate limit:
+- **Prevent abuse:** brute-force logins, scraping, spam.
+- **Prevent overload:** protect databases and downstream services from spikes.
+- **Fairness:** one heavy user can't starve the rest.
+- **Cost control & business:** API tiers ("free: 100 req/min, pro: 10,000 req/min").
+
+## The algorithms: try to beat each one
+
+<RateLimiterSim />
+
+| Algorithm | How | Bursts? | Memory | Notes |
+|---|---|---|---|---|
+| <Term k="token-bucket">**Token bucket**</Term> | Tokens refill at rate r up to capacity b; each request costs 1 token | ✅ up to b | Tiny (2 numbers) | **Most popular.** Used by AWS, Stripe and many APIs |
+| **Leaky bucket** | Requests enter a fixed-size queue drained at a constant rate | Smoothed (queued) | Queue size | Gives a perfectly steady output rate, e.g. for a downstream that hates spikes |
+| **Fixed window counter** | Count requests per clock window (e.g. per minute) | ⚠️ 2× at window edges | Tiny | Simplest. Burst at 0:59 + 1:00 lets 2× the limit through |
+| **Sliding window log** | Store each request's timestamp; count those in the last window | ❌ exact | One entry per request | Accurate but memory-hungry |
+| **Sliding window counter** | Weighted mix of current and previous fixed-window counts | ≈ exact | Tiny | Great compromise; used by Cloudflare |
+
+<Callout type="analogy">
+**Token bucket** is like a phone plan with rollover data: you get a steady allowance, and unused allowance builds up (to a max) so you can occasionally use a lot at once. **Leaky bucket** is a funnel: pour as fast as you like, it only drips out at one speed, and if it overflows, the extra spills.
+</Callout>
+
+## What do you limit by?
+
+- **User ID or API key** (most accurate for logged-in traffic)
+- **IP address** (for anonymous traffic; careful: many users can share an IP behind a company NAT or mobile carrier)
+- **Endpoint** (login: 5/min; search: 60/min; reading a page: 1000/min)
+- **Combination**, plus a **global** limit to protect the whole system
+
+## Where does the limiter live?
+
+<ArchFlow
+  title="Distributed rate limiting with Redis"
+  height={300}
+  nodes={[
+    { id: 'c', label: 'Clients', kind: 'user', x: 90, y: 150 },
+    { id: 'gw', label: 'API gateway', sub: 'rate limit middleware', kind: 'gateway', x: 330, y: 150, w: 170 },
+    { id: 'redis', label: 'Redis', sub: 'shared counters', kind: 'cache', x: 330, y: 270 },
+    { id: 's', label: 'Services', kind: 'server', x: 620, y: 150 },
+    { id: 'rules', label: 'Rules config', sub: 'limits per tier', kind: 'storage', icon: '📋', x: 620, y: 50 },
+  ]}
+  edges={[
+    { from: 'c', to: 'gw' },
+    { from: 'gw', to: 'redis', label: 'INCR / token check' },
+    { from: 'gw', to: 's', label: 'if allowed' },
+    { from: 'rules', to: 'gw', dashed: true, label: 'cached rules' },
+  ]}
+  steps={[
+    { title: 'Check at the edge', text: 'The API gateway (or a middleware) checks every request before it reaches your services. Rejected requests cost almost nothing.', add: ['c', 'gw', 's'], flow: ['c>gw'] },
+    { title: 'Counters must be shared', text: 'With 20 gateway servers, each server counting on its own would allow 20× the limit. So counters live in a shared, fast store: <b>Redis</b>. An atomic Lua script or <code>INCR</code> + <code>EXPIRE</code> updates and checks in one step (no race conditions).', add: ['redis'], flow: ['gw>redis', 'redis>gw'] },
+    { title: 'Rules are configuration', text: 'Limits per plan and endpoint are loaded from config and cached in memory on the gateway.', add: ['rules'], flow: ['rules>gw'] },
+    { title: 'Allowed → forward', text: 'If within limits, forward to the service. If not, return 429 with headers like <code>X-RateLimit-Remaining</code> and <code>Retry-After</code> so well-behaved clients can back off.', flow: ['gw>s'] },
+  ]}
+/>
+
+Practical details:
+- **Fail open or closed?** If Redis is down, usually **fail open** (allow traffic) for normal APIs so a limiter outage doesn't become a full outage; maybe **fail closed** for sensitive endpoints like login.
+- **Latency:** the check adds a Redis round trip (~1 ms). For extreme scale, use local token buckets per server and sync with Redis periodically (slightly less exact).
+- **Layers:** CDN/WAF limits (blocks floods early) + gateway limits (per user/key) + service-level limits (protect a fragile DB).
+
+<Callout type="interview">
+"Design a rate limiter" is a classic question (full walkthrough in Module 7). Key points: **token bucket**, **keyed by user/API key**, **counters in Redis with atomic operations**, **runs at the gateway**, returns **429 + Retry-After**, and decide **fail-open vs fail-closed**.
+</Callout>
+
+<Takeaways>
+- Rate limiting stops **abuse, overload and unfairness**; rejected requests get **429**.
+- **Token bucket** (bursty, simple) is the default; **sliding window** variants are accurate; **fixed window** has the edge-burst problem.
+- In a distributed system, keep counters in a **shared store (Redis)** and update them **atomically**.
+- Put it **at the edge** (gateway), keyed by **user / API key / IP**, and decide **fail-open vs fail-closed**.
+</Takeaways>
+
+<Quiz
+  id="rate-limiting"
+  questions={[
+    { q: 'Which algorithm allows short bursts while enforcing an average rate?', options: ['Leaky bucket', 'Token bucket', 'Fixed window', 'None'], answer: 1, explain: 'Saved-up tokens allow a burst up to the bucket size; the refill rate sets the long-run average.' },
+    { q: 'Limit: 100 per minute (fixed window). How many requests can pass between 0:59 and 1:01?', options: ['100', 'Up to 200', '50', '0'], answer: 1, explain: '100 at the end of one window and 100 at the start of the next: the fixed-window edge problem.' },
+    { q: 'You run 10 API servers, each with its own in-memory counter and a limit of 100/min. What is the effective limit?', options: ['100/min', 'Up to ~1,000/min', '10/min', 'Unlimited'], answer: 1, explain: 'Each server counts separately. Use a shared store like Redis for a global limit.' },
+    { q: 'What status code should a rate-limited request receive?', options: ['403', '404', '429', '503'], answer: 2, explain: '429 Too Many Requests, ideally with Retry-After.' },
+    { q: 'Why is rate limiting by IP alone sometimes unfair?', options: ['IPs are encrypted', 'Many real users can share one IP (office NAT, mobile carriers)', 'IPs change every request', 'It’s too slow'], answer: 1, explain: 'Hundreds of users behind one IP would share one small limit. Prefer user ID / API key when available.' },
+  ]}
+/>

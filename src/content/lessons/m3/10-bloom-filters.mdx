@@ -1,0 +1,67 @@
+---
+title: Bloom Filters & Probabilistic Structures
+slug: bloom-filters
+description: Answer “have I seen this before?” for billions of items using a tiny amount of memory, by accepting a small chance of being wrong.
+module: m3
+order: 10
+minutes: 11
+---
+
+<Callout type="problem">
+A web crawler has visited 10 billion URLs. Before fetching a new URL, it must check "have I already crawled this?" Storing 10 billion URLs (~100 bytes each) is about **1 TB**, too much for memory. Asking the database for every URL is too slow. **Can we answer "seen before?" with a few GB of RAM?**
+</Callout>
+
+## The Bloom filter
+
+A <Term k="bloom-filter">Bloom filter</Term> is a bit array (all 0s at start) plus a few hash functions:
+- **Add** an item: hash it with each function; set those bit positions to 1.
+- **Check** an item: hash it the same way. If **any** of those bits is 0 → the item was **definitely never added**. If **all** are 1 → it was **probably** added (or the bits were set by other items).
+
+<BloomFilterSim />
+
+So a Bloom filter can say:
+- ✅ "**Definitely not** in the set": always correct (no false negatives).
+- 🤷 "**Probably** in the set": might be wrong (false positives).
+
+The false-positive rate depends on the number of bits per item and the number of hash functions. Around **10 bits per item gives ~1% false positives**. For 10 billion URLs: ~12 GB instead of ~1 TB.
+
+## Where they're used
+
+- **Databases (Cassandra, HBase, RocksDB, Bigtable):** before reading an on-disk file (SSTable) to look for a key, check that file's Bloom filter. If it says "definitely not", skip the expensive disk read. Huge win for LSM-tree stores.
+- **Web crawlers:** "already crawled this URL?"
+- **Cache penetration protection:** requests for IDs that don't exist always miss the cache and hit the DB. A Bloom filter of all valid IDs rejects bogus ones early.
+- **Recommendations:** "don't show articles the user has already read" (Medium has written about this).
+- **Malicious URL checks:** browsers have used Bloom filters to check URLs locally before asking a server.
+
+<Callout type="why" title="Why the asymmetry is useful">
+Bloom filters are used as a **cheap first check before an expensive one**. A false positive only costs one unnecessary expensive check (we then find the item really isn't there). A false negative would be a real bug, and Bloom filters never produce one. Note: you can't **delete** items from a basic Bloom filter (clearing a bit might remove other items too). Counting Bloom filters or cuckoo filters support deletion.
+</Callout>
+
+## Other probabilistic tricks worth knowing
+
+| Structure | Answers | Memory | Used for |
+|---|---|---|---|
+| **Bloom filter** | Is X in the set? (maybe / definitely not) | ~10 bits/item | Dedup, skip disk reads |
+| **HyperLogLog** | How many **distinct** items? (±~1%) | ~12 KB for billions | Unique visitors, distinct searches (Redis `PFADD` / `PFCOUNT`) |
+| **Count-Min Sketch** | How many times did X appear? (may overestimate) | Small fixed table | Trending hashtags, heavy hitters, top-K |
+
+<Callout type="interview">
+Mention a Bloom filter in: **web crawler** ("URL-seen check"), **cache penetration** ("filter non-existent keys"), **username availability** ("quick check before the DB"). Mention **HyperLogLog** for "count unique visitors" and **Count-Min Sketch** for "top trending items" at huge scale. These show depth.
+</Callout>
+
+<Takeaways>
+- A Bloom filter answers **"definitely not"** or **"probably yes"** using a bit array and k hash functions.
+- **No false negatives**, a tunable rate of **false positives** (~1% at ~10 bits/item).
+- Use it as a **cheap pre-check** before expensive lookups.
+- Related: **HyperLogLog** (count distinct), **Count-Min Sketch** (frequencies / top-K).
+</Takeaways>
+
+<Quiz
+  id="bloom"
+  questions={[
+    { q: 'A Bloom filter says an item is NOT in the set. How reliable is that?', options: ['Usually right', '100% reliable: no false negatives', '50/50', 'Never reliable'], answer: 1, explain: 'If any of the item’s bits is 0, it was never added. Bloom filters don’t produce false negatives.' },
+    { q: 'What happens as you add more and more items to a fixed-size Bloom filter?', options: ['False negatives appear', 'More bits are 1, so the false-positive rate rises', 'It uses more memory', 'Nothing'], answer: 1, explain: 'A fuller bit array matches more random items by accident.' },
+    { q: 'How do LSM-tree databases like Cassandra use Bloom filters?', options: ['To encrypt data', 'To skip reading on-disk files that definitely don’t contain a key', 'To elect leaders', 'For compression'], answer: 1, explain: 'One cheap memory check avoids an expensive disk read for each file.' },
+    { q: 'Which structure estimates the number of unique visitors using ~12 KB?', options: ['Bloom filter', 'HyperLogLog', 'B-tree', 'Count-Min Sketch'], answer: 1, explain: 'HyperLogLog estimates cardinality (distinct count) with tiny memory.' },
+  ]}
+/>

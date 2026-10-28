@@ -1,0 +1,106 @@
+---
+title: Idempotency, Retries & Backoff
+slug: idempotency-and-retries
+description: Networks fail in the middle. How to retry safely without charging a customer twice, and without crushing a recovering server.
+module: m3
+order: 4
+minutes: 14
+---
+
+<Callout type="problem">
+A user taps "Pay ₹2,000". The request reaches your server, the payment succeeds, but the response is lost on the way back (the phone switched from Wi-Fi to 4G). The app sees a timeout. **Did the payment happen?** The app doesn't know. If it retries, the user might pay twice. If it doesn't, the order might never complete.
+</Callout>
+
+## The three outcomes of a remote call
+
+When you call another service over a network, there are not two outcomes (success / failure), there are **three**:
+1. ✅ It worked, and you got the response.
+2. ❌ It failed, and you know it failed.
+3. ❓ **You don't know**: timeout, connection reset. Maybe it ran, maybe it didn't.
+
+Case 3 is the tricky one, and it happens **all the time** at scale. The answer is to make operations safe to repeat.
+
+## Idempotency
+
+An operation is <Term k="idempotent">idempotent</Term> if doing it many times has the **same effect** as doing it once.
+
+| Operation | Idempotent? | Why |
+|---|---|---|
+| `GET /orders/42` | ✅ | Reading changes nothing |
+| `PUT /users/7 { city: "Pune" }` | ✅ | Setting a value to X twice = X |
+| `DELETE /orders/42` | ✅ | Already deleted → still deleted |
+| `POST /payments { amount: 2000 }` | ❌ | Each call creates a new payment |
+| `UPDATE balance = balance - 100` | ❌ | Each call subtracts again |
+| `UPDATE status = 'shipped'` | ✅ | Same end state |
+
+## Idempotency keys: making POST safe
+
+The client generates a **unique ID for the operation** (not for each attempt) and sends it with every retry:
+
+<SequenceFlow
+  title="Payment with an idempotency key"
+  actors={[
+    { id: 'c', label: 'Mobile app', icon: '📱' },
+    { id: 's', label: 'Payment API', icon: '🖥️' },
+    { id: 'db', label: 'Database', icon: '🗄️' },
+  ]}
+  messages={[
+    { from: 'c', to: 's', label: 'POST /pay  Idempotency-Key: 7f3a…', note: 'When the user taps Pay, the app generates a UUID <code>7f3a…</code> once and attaches it to the request.' },
+    { from: 's', to: 'db', label: 'INSERT key 7f3a (unique) + charge', note: 'The server stores the key in a table with a <b>unique constraint</b>, in the same transaction as the payment.' },
+    { from: 's', to: 'c', label: '200 OK (lost in the network!)', dashed: true, bad: true, note: 'The payment succeeded, but the response never arrives. The app sees a timeout.' },
+    { from: 'c', to: 's', label: 'retry: POST /pay  Idempotency-Key: 7f3a…', note: 'The app retries with the <b>same key</b>.' },
+    { from: 's', to: 'db', label: 'key 7f3a exists → load saved result', note: 'The server sees the key already processed, so it does <b>not</b> charge again. It returns the stored result of the first attempt.' },
+    { from: 's', to: 'c', label: '200 OK (same response as before)', dashed: true, note: 'The user is charged exactly once, and the app gets a definite answer. Stripe’s API works exactly like this.' },
+  ]}
+/>
+
+The same idea works for **queue consumers** (remember at-least-once delivery): store the IDs of processed messages and skip duplicates, or design the update to be naturally idempotent.
+
+<Callout type="frontend">
+On the frontend: generate the idempotency key **when the user starts the action** (e.g. on the click), not inside the retry loop. Also disable the button after the first click, but don't rely on that alone. Double-submits also come from network retries, page refreshes and impatient users on two tabs.
+</Callout>
+
+## Retrying well: backoff and jitter
+
+Retrying immediately and repeatedly is dangerous. If a server is overloaded and every client hammers it with retries, it never recovers. That's a **retry storm**. See what happens with 60 clients:
+
+<BackoffSim />
+
+Rules for good retries:
+1. **Only retry what's retryable:** timeouts, 503, 429, connection errors. Don't retry 400 Bad Request (it'll fail the same way).
+2. **Only retry idempotent operations** (or ones protected by an idempotency key).
+3. <Term k="backoff">**Exponential backoff**</Term>: wait 1 s, 2 s, 4 s, 8 s…
+4. **Add jitter:** randomize the wait so clients don't retry in sync.
+5. **Cap it:** a maximum wait and a maximum number of attempts, then give up and report the error.
+6. **Respect `Retry-After`** headers from the server.
+7. **Retry budgets:** limit retries to e.g. 10% of total traffic so retries can't multiply load during an outage.
+
+<Callout type="warn" title="Retries multiply across layers">
+If the app retries 3×, the gateway retries 3× and the service retries the DB 3×, one user action can become **27 DB calls** during an outage. Retry at **one** layer (usually closest to the user), not every layer.
+</Callout>
+
+## Timeouts
+
+Every network call needs a **timeout**. Without one, a hung dependency keeps threads waiting forever and your service runs out of resources. Set timeouts from real latency data (e.g. a bit above the p99), and make sure the total of downstream timeouts fits inside your own deadline.
+
+<Callout type="interview">
+Whenever your design has payments, orders, or messages processed from a queue, say: "Clients send an **idempotency key**; the server stores it with a **unique constraint** and returns the saved result on duplicates. Retries use **exponential backoff with jitter**, only for retryable errors." This shows real production thinking.
+</Callout>
+
+<Takeaways>
+- Remote calls have a third outcome: **unknown**. Design for it.
+- **Idempotent** operations are safe to repeat. Make non-idempotent ones safe with **idempotency keys**.
+- Retry only **retryable errors**, with **exponential backoff + jitter**, caps and budgets.
+- Always set **timeouts**; avoid retrying at every layer.
+</Takeaways>
+
+<Quiz
+  id="idempotency"
+  questions={[
+    { q: 'Which operation is idempotent?', options: ['POST /orders', 'UPDATE balance = balance + 100', 'PUT /users/7 with the full new profile', 'INSERT a new log row'], answer: 2, explain: 'PUT replaces the resource with the same content each time; repeated calls give the same state.' },
+    { q: 'Where should the idempotency key be generated?', options: ['Freshly on every retry attempt', 'Once per user action, reused for all retries of that action', 'By the database', 'By the load balancer'], answer: 1, explain: 'If each retry had a new key, the server couldn’t detect duplicates.' },
+    { q: 'Why add random jitter to exponential backoff?', options: ['To make retries faster', 'To spread retries out so many clients don’t hit the server at the same moment', 'To encrypt requests', 'It’s required by HTTP'], answer: 1, explain: 'Without jitter, clients that failed together retry together, causing synchronized spikes.' },
+    { q: 'Which error should NOT be retried automatically?', options: ['503 Service Unavailable', 'Connection timeout', '400 Bad Request', '429 Too Many Requests (after Retry-After)'], answer: 2, explain: 'A malformed request will fail the same way every time.' },
+    { q: 'The app, gateway and service each retry 3 times. During an outage, one user click can cause up to how many calls to the failing DB?', options: ['3', '9', '27', '1'], answer: 2, explain: '3 × 3 × 3 = 27. Retry at one layer to avoid amplification.' },
+  ]}
+/>

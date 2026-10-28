@@ -1,0 +1,88 @@
+---
+title: Concurrency, Locking & Distributed Locks
+slug: concurrency-and-locking
+description: Race conditions, pessimistic vs optimistic locking, and how to build a lock across many servers without shooting yourself in the foot.
+module: m3
+order: 8
+minutes: 15
+---
+
+<Callout type="problem">
+A concert has 1 seat left. At 10:00:00.000, 50,000 fans click "Book". Your code does: **check** if the seat is free → **book** it. Between the check and the book, other requests sneak in and also see "free". **Ten people get confirmation emails for the same seat.**
+</Callout>
+
+## The race condition
+
+A <Term k="race-condition">race condition</Term> happens when correctness depends on the **timing** of concurrent operations. The classic shape is **check-then-act**: read a value, decide, write, while someone else does the same in between. Step through it and try each fix:
+
+<LockingSim />
+
+## Your toolbox (single database)
+
+<Versus
+  items={[
+    { name: 'Pessimistic locking', icon: '🔒', pros: ['Lock first (SELECT … FOR UPDATE), then act', 'Simple to reason about', 'Good when conflicts are frequent'], cons: ['Others wait → lower throughput on hot rows', 'Locks held too long hurt everyone', 'Risk of deadlocks (A waits for B, B waits for A)'], use: 'High-contention updates where retries would be wasteful, e.g. a hot inventory row in a short transaction.' },
+    { name: 'Optimistic locking', icon: '🤞', pros: ['No locks; check a version on write', 'Great throughput when conflicts are rare', 'Works across long user “think time” (edit forms)'], cons: ['Conflicts → retries / errors', 'Under heavy contention, many requests fail'], use: 'Most CRUD updates, editing documents, wiki pages, carts. Conflicts are rare.' },
+  ]}
+/>
+
+And the simplest of all: **atomic conditional updates** (`UPDATE ... WHERE status = 'available'`) or database constraints (a **unique index** on `(event_id, seat_id)` in a bookings table makes double booking impossible at the database level, no matter what your code does).
+
+<Callout type="tip">
+Let the database enforce invariants whenever possible: **unique constraints, CHECK constraints, conditional updates**. Code can have bugs and races; a unique index cannot be raced.
+</Callout>
+
+## Distributed locks
+
+Sometimes the thing you protect isn't a single DB row: "only one worker should process this file", "only one instance should run the nightly job", "only one request should rebuild this cache key". With many servers, you need a <Term k="distributed-lock">distributed lock</Term>.
+
+### Redis lock (simple)
+
+```text
+SET lock:report-2026-10-28 <unique-owner-id> NX PX 30000
+```
+- `NX` = only set if it doesn't exist (only one winner).
+- `PX 30000` = auto-expire after 30 s, so a crashed holder doesn't block forever.
+- To release, delete it **only if the value is still your owner ID** (use a small Lua script so check + delete is atomic).
+
+### The danger: the lock expires while you still think you hold it
+
+1. Worker A takes the lock (30 s TTL).
+2. Worker A pauses for 40 s (long garbage collection, slow network…).
+3. The lock expires; Worker B takes it and starts writing.
+4. Worker A wakes up, **still thinks it has the lock**, and also writes. 💥
+
+**Fix: fencing tokens.** Every time the lock is granted, it comes with an increasing number (33, 34, 35…). The storage system rejects writes that carry a token **older** than one it has already seen. Worker A's write with token 33 is rejected after B wrote with token 34. Consensus systems like **ZooKeeper/etcd** provide this naturally (via versions/revisions), which is why they're preferred for locks where correctness really matters.
+
+<Callout type="why" title="Redis lock or ZooKeeper/etcd lock?">
+**Redis locks** are fast and fine for **efficiency** ("avoid doing the same work twice"; if it occasionally happens, no harm). For **correctness** ("two holders would corrupt data"), use a consensus-based lock (etcd/ZooKeeper) **with fencing tokens**, or better, redesign so the database itself enforces the rule.
+</Callout>
+
+## Other ways to avoid locks entirely
+
+- **Single writer per key:** route all updates for one key to one partition/worker (Kafka partitioned by key). No concurrent writers → no race.
+- **Queues for hot items:** put booking requests for one flash-sale item into a queue processed one by one.
+- **Commutative operations:** increments (`INCR`) and CRDT counters don't care about order.
+- **Reservation with expiry:** hold a seat for 10 minutes (`status = HELD, held_until = ...`), then confirm or release. This is how ticket sites work.
+
+<Callout type="interview">
+Booking-style questions (tickets, hotel rooms, flash sales) are all about this lesson. A strong answer: "**Hold** the seat with an atomic conditional update (`WHERE status = 'available'`) plus a **unique constraint** as the safety net, set `held_until = now + 10 min`; a background job releases expired holds. For flash sales with huge contention, put requests for the hot item in a **queue** so they're processed serially."
+</Callout>
+
+<Takeaways>
+- **Check-then-act** across concurrent requests creates races.
+- Fixes in one DB: **atomic conditional updates**, **unique constraints**, **pessimistic locks** (`FOR UPDATE`), **optimistic locks** (version column).
+- **Distributed locks:** Redis `SET NX PX` for efficiency; etcd/ZooKeeper + **fencing tokens** for correctness.
+- Often the best lock is **no lock**: single writer per key, queues, reservations with expiry.
+</Takeaways>
+
+<Quiz
+  id="concurrency"
+  questions={[
+    { q: 'Which is the most robust protection against double booking the same seat?', options: ['Checking availability in the app before inserting', 'A unique constraint on (event_id, seat_id) in the bookings table', 'Telling users not to double click', 'A cache'], answer: 1, explain: 'The database will reject the second insert no matter how the requests race.' },
+    { q: 'When is optimistic locking a good fit?', options: ['When conflicts are very frequent', 'When conflicts are rare and you want no waiting', 'Only for NoSQL', 'Never'], answer: 1, explain: 'With rare conflicts, most writes succeed on the first try with no locking overhead.' },
+    { q: 'Why does a Redis lock need an expiry (PX)?', options: ['Redis requires it', 'So a crashed holder doesn’t block everyone forever', 'For encryption', 'To speed up reads'], answer: 1, explain: 'Without expiry, a dead process would hold the lock forever.' },
+    { q: 'What problem do fencing tokens solve?', options: ['Slow locks', 'A paused process whose lock expired still writing, after someone else took the lock', 'Deadlocks in SQL', 'Network encryption'], answer: 1, explain: 'Storage rejects writes with an older token, so the stale holder can’t corrupt data.' },
+    { q: 'A flash sale: 100K users try to buy 100 phones in one second. Which approach reduces contention best?', options: ['Pessimistic lock on one row for each request', 'Queue purchase requests and process them serially / in controlled batches', 'No protection', 'Cache the stock count only'], answer: 1, explain: 'A queue turns a stampede on one hot row into an orderly line.' },
+  ]}
+/>

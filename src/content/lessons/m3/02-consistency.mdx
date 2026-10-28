@@ -1,0 +1,82 @@
+---
+title: Consistency Models & Quorums
+slug: consistency-models
+description: Strong, eventual, causal, read-your-writes. What each one promises, and how quorums (R + W > N) let you tune between them.
+module: m3
+order: 2
+minutes: 15
+---
+
+<Callout type="problem">
+"Consistent" is one of the most overloaded words in our field. When a product manager says "the data must be consistent", do they mean every user sees the exact same thing at the same instant? Or that a user always sees their **own** changes? Or that replies never appear before the message they reply to? **These are different guarantees with very different costs.**
+</Callout>
+
+## A spectrum, from strongest to weakest
+
+| Model | Promise | Example | Cost |
+|---|---|---|---|
+| **Linearizable** (strong) | Every read sees the latest completed write. The system acts like a single copy. | Bank balance, locks, leader election | Highest latency; coordination on every operation |
+| **Sequential / serializable** | All nodes see operations in the same order | Database transactions | High |
+| **Causal** | If A caused B (a reply to a message), everyone sees A before B. Unrelated writes may appear in any order. | Comments and replies, chat | Medium |
+| **Read-your-own-writes** | A user always sees their own updates | Edit your profile, then see it | Low (route that user's reads smartly) |
+| **Monotonic reads** | You never see time go backwards (newer, then older) | Refreshing a feed | Low (stick a user to a replica) |
+| **Eventual** | If writes stop, all copies **eventually** agree. No promise about when. | Like counts, DNS, view counts | Lowest; fastest and most available |
+
+<Term k="strong-consistency">Strong consistency</Term> is easy to reason about but expensive. <Term k="eventual-consistency">Eventual consistency</Term> is cheap and highly available but surprising to users if you're not careful. Many real apps use **eventual consistency plus a few targeted guarantees** (read-your-writes, monotonic reads, causal for replies).
+
+<Callout type="frontend">
+You deal with this on the client too. **Optimistic updates** in React Query or Apollo show the user's own write immediately (read-your-own-writes, locally), then reconcile with the server. And a chat UI that shows a reply before the original message is a **causal consistency** bug.
+</Callout>
+
+## Quorums: tuning consistency with numbers
+
+In leaderless systems (Cassandra, DynamoDB, Riak), each piece of data is stored on **N** replicas. You choose:
+- **W** = how many replicas must confirm a **write** before it's "successful".
+- **R** = how many replicas you ask on a **read** (you take the newest value among them).
+
+The magic rule: **if R + W > N, every read overlaps at least one replica that has the latest write.** That's a <Term k="quorum">quorum</Term>.
+
+<QuorumSim />
+
+| Setting (N=3) | Behaviour |
+|---|---|
+| W=3, R=1 | Reads are fast and fresh; writes fail if any replica is down |
+| W=1, R=3 | Writes fast; reads slow and fail if any replica is down |
+| **W=2, R=2** | **Balanced and common**: survives one replica down for both reads and writes |
+| W=1, R=1 | Fastest and most available, but reads may be stale (eventual) |
+
+Cassandra calls these consistency levels `ONE`, `QUORUM`, `ALL`, and you can pick per query: `QUORUM` writes + `QUORUM` reads for strong-ish consistency on important data, `ONE` for speed elsewhere.
+
+<Callout type="deep" title="Going deeper: how replicas catch up">
+Replicas that missed writes are fixed by **read repair** (when a read sees an old value on one replica, it writes the new value back), **hinted handoff** (a neighbour holds writes for a down replica and delivers them later), and **anti-entropy** (background comparison using Merkle trees). Conflicting concurrent writes are resolved by **last-write-wins** (timestamps; simple but can drop data) or **vector clocks / CRDTs** (keep both and merge).
+</Callout>
+
+## Choosing in practice
+
+Ask for each piece of data: **"What's the worst thing that happens if a user sees an old value for a few seconds?"**
+
+- Nothing much → **eventual** (likes, views, recommendations, feed).
+- The user gets confused about their own action → add **read-your-own-writes**.
+- Money is lost, an item is oversold, two people get the same seat → **strong** (and transactions).
+
+<Callout type="interview">
+Avoid saying just "it'll be consistent". Be precise: "The feed is **eventually consistent**. We guarantee **read-your-own-writes** for a user's own posts by reading them from the primary for 1 minute after posting. Payments are **strongly consistent** in PostgreSQL." If you use Cassandra/Dynamo, mention **quorum reads/writes (R + W > N)**.
+</Callout>
+
+<Takeaways>
+- Consistency is a **spectrum**: linearizable → causal → read-your-writes → eventual.
+- Stronger = easier to reason about but **slower and less available**.
+- **Quorums:** with N replicas, **R + W > N** makes reads see the latest write. W=R=2 with N=3 is the classic balance.
+- Pick per feature by asking **what breaks if data is a little stale**.
+</Takeaways>
+
+<Quiz
+  id="consistency"
+  questions={[
+    { q: 'N = 3. Which setting guarantees reads see the latest successful write?', options: ['W=1, R=1', 'W=1, R=2', 'W=2, R=2', 'W=0, R=3'], answer: 2, explain: '2 + 2 = 4 > 3, so the read set and write set always overlap in at least one replica.' },
+    { q: 'A user posts a comment, refreshes, and it’s missing. Which guarantee is violated?', options: ['Linearizability of all users', 'Read-your-own-writes', 'Causal consistency', 'Durability'], answer: 1, explain: 'The user can’t see their own write, usually because the read hit a lagging replica.' },
+    { q: 'Replies appear before the message they reply to. Which model prevents this?', options: ['Eventual consistency', 'Causal consistency', 'Monotonic reads', 'Last-write-wins'], answer: 1, explain: 'Causal consistency guarantees cause-before-effect ordering for related operations.' },
+    { q: 'Which data is a good fit for eventual consistency?', options: ['Remaining seats on a flight', 'Video view count', 'Account balance', 'Distributed lock owner'], answer: 1, explain: 'A view count being slightly behind is harmless.' },
+    { q: 'With N=3, W=3: what happens if one replica is down?', options: ['Writes still succeed', 'Writes fail (can’t get 3 acknowledgements)', 'Reads fail', 'Nothing changes'], answer: 1, explain: 'W=3 needs all replicas. Strong for reads with R=1, but writes lose availability.' },
+  ]}
+/>

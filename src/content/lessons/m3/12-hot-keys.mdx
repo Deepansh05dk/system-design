@@ -1,0 +1,73 @@
+---
+title: Hot Keys & the Thundering Herd
+slug: hot-keys-and-thundering-herd
+description: What happens when everyone wants the same thing at the same moment. Cache stampedes, celebrity problems and how to defuse them.
+module: m3
+order: 12
+minutes: 12
+---
+
+<Callout type="problem">
+A cricket World Cup final. The live score key `match:final:score` is read **2 million times per second**. Its cache entry expires. In the 200 ms it takes to rebuild it, 400,000 requests miss the cache and hit the database at the same instant. The database falls over, which makes the rebuild slower, which makes more requests miss… **The whole site goes down because one key expired.**
+</Callout>
+
+## Two related problems
+
+1. **Hot key / hotspot:** one key (a celebrity, a viral post, a flash-sale product, a live match) gets a huge share of traffic. Its shard, cache node or DB row is overloaded while others idle. Sharding doesn't help, because one key lives on one shard.
+2. **Thundering herd / cache stampede:** many requests wait for or rebuild the **same** thing at the **same** moment (a popular cache key expiring, a service restarting, all clients reconnecting after an outage).
+
+## See the stampede
+
+<StampedeSim />
+
+## Defusing the <Term k="thundering-herd">thundering herd</Term>
+
+| Technique | Idea |
+|---|---|
+| **Single-flight / request coalescing** | Only one request rebuilds a missing key (take a short lock, e.g. Redis `SET NX`); others wait for its result or get the stale value |
+| **Stale-while-revalidate** | Serve the old value after expiry while one background job refreshes it |
+| **Early / probabilistic refresh** | Refresh a hot key shortly **before** it expires (randomly, the closer to expiry, the likelier) |
+| **TTL jitter** | Randomize TTLs so many keys don't expire together |
+| **Never expire hot keys** | Update them actively on change (write-through) instead of letting them expire |
+| **Backoff with jitter** on reconnect | Clients reconnecting after an outage spread out instead of all at once |
+
+## Handling hot keys
+
+| Technique | Idea |
+|---|---|
+| **Local (in-process) cache** | Each app server keeps the hottest keys in its own memory for a second or two. 1,000 servers → the cache cluster sees ~1,000 requests/sec instead of millions |
+| **Replicate the hot key** | Store copies under `key#1 … key#N` across different cache nodes; readers pick one at random |
+| **Split writes for counters** | A viral post's like counter: write to `likes:post42:shard0..15` and sum on read (or sum periodically) |
+| **CDN / edge caching** | Even a 1-second cache at the CDN absorbs a huge read spike for public data |
+| **Precompute & push** | For known events (a sale starting at noon), warm caches in advance |
+| **Request queueing** | For hot **writes** (flash-sale inventory), funnel requests through a queue |
+
+<Callout type="analogy">
+A thundering herd is like a shop that opens its doors at 10:00 sharp for a big sale: everyone rushes in at once and the entrance jams. Solutions: let people in gradually (jitter), give out numbered tokens (single-flight), or open more doors (replicate the hot key).
+</Callout>
+
+<Callout type="frontend">
+On the client side: when your app comes back online or a WebSocket server restarts, **don't** let every client reconnect and refetch at the exact same second. Add random delay and exponential backoff to reconnection logic. Your client code can create or prevent a thundering herd.
+</Callout>
+
+<Callout type="interview">
+Celebrity users (Twitter), viral posts, live events and flash sales are favourite follow-ups. When the interviewer asks "what if a celebrity with 100M followers posts?" or "what if this key gets 1M QPS?", reach for: **local in-memory caching + key replication for reads**, **sharded counters for writes**, and **single-flight / stale-while-revalidate** so expiry doesn't cause a stampede.
+</Callout>
+
+<Takeaways>
+- **Hot keys** overload one shard/node; sharding alone doesn't help.
+- **Thundering herd**: many requests rebuild/wait for the same thing at once.
+- Stampede fixes: **single-flight locks, stale-while-revalidate, early refresh, TTL jitter**.
+- Hot key fixes: **local caches, replicated keys, sharded counters, CDN, pre-warming, queues**.
+</Takeaways>
+
+<Quiz
+  id="hot-keys"
+  questions={[
+    { q: 'A popular key expires and 50,000 requests hit the DB at once. What is this called?', options: ['Split brain', 'Cache stampede (thundering herd)', 'Replication lag', 'Deadlock'], answer: 1, explain: 'Many simultaneous misses on the same key all go to the backing store.' },
+    { q: 'Which technique ensures only ONE request rebuilds a missing cache value?', options: ['TTL jitter', 'Single-flight lock / request coalescing', 'Sharding', 'Read replicas'], answer: 1, explain: 'One request takes a short lock and rebuilds; others wait or use stale data.' },
+    { q: 'Does TTL jitter fix a stampede on ONE very hot key?', options: ['Yes, completely', 'No; it prevents many keys expiring at once. Combine with single-flight/SWR for one hot key', 'Yes, but only with SQL', 'It makes it worse'], answer: 1, explain: 'Jitter spreads expiry times across keys, not requests for one key.' },
+    { q: 'A viral post gets 200K likes per second, overloading one counter row. A good fix?', options: ['A bigger database', 'Split the counter into N sub-counters (sharded counter) and sum them', 'Remove the like button', 'Use a longer TTL'], answer: 1, explain: 'Spreading writes across many keys removes the single hot spot.' },
+    { q: 'How does a per-server local cache help with a hot read key?', options: ['It doesn’t', 'Each server answers from its own memory, so the shared cache sees only one request per server per refresh interval', 'It encrypts the key', 'It speeds up writes'], answer: 1, explain: 'Millions of reads become (servers × refresh rate) reads on the shared cache.' },
+  ]}
+/>

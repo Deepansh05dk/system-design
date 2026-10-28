@@ -1,0 +1,104 @@
+---
+title: Fault Tolerance & Circuit Breakers
+slug: fault-tolerance
+description: Everything fails eventually. Redundancy, heartbeats, failover, circuit breakers, bulkheads and graceful degradation.
+module: m3
+order: 5
+minutes: 15
+---
+
+<Callout type="problem">
+At scale, failure is not an event, it's **the weather**. With 10,000 servers, if each one fails once every three years, about **9 servers die every day**. Disks fail, networks drop packets, a deploy has a bug, a whole data center loses power. **How do you build a system that keeps working while its parts are breaking?**
+</Callout>
+
+## Principle 1: no single points of failure
+
+A <Term k="spof">single point of failure (SPOF)</Term> is any component that takes everything down when it dies. The cure is **redundancy**: have more than one, and be able to switch.
+
+| Component | Redundancy |
+|---|---|
+| App servers | Many behind a load balancer, across availability zones |
+| Load balancer | Active–passive pair or managed multi-zone LB |
+| Database | Replicas + automatic failover |
+| Cache | Replicated Redis (primary + replica, Sentinel/Cluster) |
+| Data center | Multiple availability zones; for critical systems, multiple regions |
+
+Go through your diagram box by box and ask: **"What happens when this dies?"** That's the single most useful habit in system design.
+
+## Principle 2: detect failures fast
+
+- <Term k="heartbeat">**Heartbeats:**</Term> nodes send "I'm alive" messages every second or so. Missing several → presumed dead.
+- **Health checks:** the load balancer probes `/health`.
+- **Timeouts:** a call that doesn't answer in time is treated as failed.
+
+The hard truth: in a distributed system you **can't tell** a dead node from a slow one or a broken network link. Timeouts are a guess. Too short → false alarms and needless failovers. Too long → slow recovery.
+
+## Principle 3: fail over automatically
+
+<Term k="failover">**Failover**</Term> switches traffic to a backup:
+- **Active–passive:** a standby waits and takes over when the primary fails (database primary/replica).
+- **Active–active:** all copies serve traffic; if one fails, the others absorb its share (app servers, multi-region setups).
+
+## Principle 4: stop failures from spreading
+
+The scariest failures are **cascading**: one slow service makes its callers slow, which makes *their* callers slow, until everything is down. The tools:
+
+### Circuit breakers
+
+A <Term k="circuit-breaker">circuit breaker</Term> wraps calls to a dependency. After too many failures, it "trips" and **fails fast** instead of waiting on timeouts, giving the sick service time to recover. Break the payment service and watch:
+
+<CircuitBreakerSim />
+
+The three states:
+- **Closed:** normal; calls go through; failures are counted.
+- **Open:** calls fail immediately (no waiting) for a cool-down period.
+- **Half-open:** a few test calls are allowed. Success → closed. Failure → open again.
+
+Libraries: Resilience4j (Java), Polly (.NET), opossum (Node.js). Service meshes like Istio/Envoy can do it without code changes.
+
+### Bulkheads
+
+Ships have watertight compartments so one leak doesn't sink the whole ship. In software: give each dependency **its own limited pool** of threads/connections. If the recommendation service hangs, it can only exhaust *its* pool. Checkout still has its own.
+
+### Timeouts and load shedding
+
+- **Timeouts everywhere** (previous lesson).
+- **Load shedding:** when overloaded, reject some requests quickly (503) instead of slowing down for everyone. Shed the least important traffic first.
+
+## Principle 5: degrade gracefully
+
+When a dependency fails, show a **reduced but working** experience instead of an error page:
+- Recommendations down → show "popular items" from a cache.
+- Reviews service down → hide the reviews section.
+- Payment provider down → accept the order and charge later (queue it), or switch to a backup provider.
+
+<Callout type="frontend">
+This is the backend version of **error boundaries** and **skeleton/fallback UIs**. A React error boundary keeps one broken widget from blanking the whole page. A circuit breaker with a fallback does the same for a broken service.
+</Callout>
+
+<Callout type="deep" title="Going deeper: chaos engineering">
+Netflix's **Chaos Monkey** randomly kills production servers during work hours. If your system can't survive that, you find out on a Tuesday afternoon, not at 3 AM on New Year's Eve. "Game days" practice failure on purpose.
+</Callout>
+
+<Callout type="interview">
+After drawing your high-level design, walk through failures proactively: "If an app server dies, the LB's health checks remove it. If the primary DB dies, a replica is promoted automatically. If the recommendation service is slow, a **circuit breaker** trips and we show cached popular items." Interviewers often ask "what if X fails?" for each box. Answering before they ask is a strong signal.
+</Callout>
+
+<Takeaways>
+- Failure is constant at scale. Remove **single points of failure** with redundancy.
+- Detect with **heartbeats, health checks and timeouts** (slow vs dead is ambiguous).
+- **Fail over** automatically: active–passive or active–active.
+- Stop cascades with **circuit breakers, bulkheads, timeouts and load shedding**.
+- **Degrade gracefully**: a partial page beats an error page.
+</Takeaways>
+
+<Quiz
+  id="fault-tolerance"
+  questions={[
+    { q: 'In the OPEN state, a circuit breaker…', options: ['Sends all requests normally', 'Fails requests immediately without calling the dependency', 'Retries each request 3 times', 'Restarts the dependency'], answer: 1, explain: 'It fails fast to protect both the caller (no stuck threads) and the struggling dependency.' },
+    { q: 'Why is a slow dependency often worse than a dead one?', options: ['It uses more disk', 'Callers wait on timeouts, threads pile up, and the slowness cascades upstream', 'It returns wrong data', 'It isn’t worse'], answer: 1, explain: 'A dead service fails fast; a slow one ties up resources everywhere that calls it.' },
+    { q: 'What is the bulkhead pattern?', options: ['Encrypting traffic', 'Isolating resources (thread/connection pools) per dependency so one failure can’t exhaust everything', 'A type of load balancer', 'Database sharding'], answer: 1, explain: 'Like ship compartments: a leak in one doesn’t sink the ship.' },
+    { q: 'The recommendation service is down. What’s a graceful degradation?', options: ['Show a 500 error page', 'Show cached popular items instead', 'Retry forever', 'Shut down the site'], answer: 1, explain: 'A reduced experience is better than none.' },
+    { q: 'Why is it hard to detect failures in distributed systems?', options: ['Servers don’t log errors', 'You can’t distinguish a dead node from a slow node or a network problem; timeouts are guesses', 'Heartbeats are too expensive', 'Failures are rare'], answer: 1, explain: 'No reply could mean dead, slow, or a lost message. That ambiguity drives much of distributed systems design.' },
+  ]}
+/>
