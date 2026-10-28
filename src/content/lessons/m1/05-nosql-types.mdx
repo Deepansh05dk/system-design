@@ -1,0 +1,120 @@
+---
+title: NoSQL Database Types
+slug: nosql-database-types
+description: Key-value, document, wide-column and graph stores. What each looks like, what it's great at, and real-world examples.
+module: m1
+order: 5
+minutes: 15
+---
+
+<Callout type="problem">
+In the late 2000s, companies like Google, Amazon and Facebook had more data and traffic than any single relational database could handle. They needed databases that could spread across **thousands of machines** and keep working when some of them failed. So they built new kinds of databases with different trade-offs.
+</Callout>
+
+<Term k="nosql">NoSQL</Term> means "not only SQL". It's not one thing. It's a family of very different databases. The common idea: **give up some relational features (JOINs, flexible queries, sometimes strict ACID) to gain scale, speed or flexibility.**
+
+## 1. Key-value stores
+
+The simplest possible database: a giant distributed hash map.
+
+```text
+SET session:9f8a2  →  { userId: 7, expires: ... }
+GET session:9f8a2  →  { userId: 7, expires: ... }
+```
+
+- **Strengths:** extremely fast (often sub-millisecond), simple, scales horizontally by splitting keys across machines.
+- **Weakness:** you can only look things up **by key**. "Find all sessions of user 7" is not possible unless you build that yourself.
+- **Examples:** <Term k="redis">Redis</Term> (in-memory), Memcached, Amazon DynamoDB, etcd.
+- **Use for:** caching, sessions, shopping carts, feature flags, rate-limit counters, leaderboards (Redis sorted sets).
+
+## 2. Document stores
+
+Store JSON-like **documents**. Each document can have a different shape. Related data is often **embedded** instead of split into tables.
+
+```json
+{
+  "_id": "order_991",
+  "user": { "id": 7, "name": "Asha" },
+  "items": [
+    { "sku": "KB-1", "name": "Keyboard", "qty": 1, "price": 1999 },
+    { "sku": "MS-2", "name": "Mouse", "qty": 2, "price": 799 }
+  ],
+  "status": "shipped"
+}
+```
+
+- **Strengths:** flexible schema; one read gets the whole object (no JOINs); maps naturally to objects in code.
+- **Weaknesses:** data duplicated across documents can go out of sync; cross-document queries and JOINs are limited; very large or deeply nested documents get slow.
+- **Examples:** MongoDB, Couchbase, Firestore.
+- **Use for:** product catalogs (each category has different attributes), content management, user profiles.
+
+<Callout type="frontend">
+If you've used **Firebase Firestore**, you've used a document database. You noticed you had to plan your data around how screens read it, and that "joins" meant multiple reads. That's the document model trade-off.
+</Callout>
+
+## 3. Wide-column stores
+
+Rows are grouped by a **partition key** and sorted by a **clustering key** inside each partition. Designed for huge write volumes across many machines.
+
+```text
+Partition key: chat_id = 42            (all messages of chat 42 live together, on the same nodes)
+  ├─ 2026-10-28 10:00:01 | from: asha | "hi"
+  ├─ 2026-10-28 10:00:05 | from: ravi | "hey!"
+  └─ 2026-10-28 10:00:09 | from: asha | "lunch?"   (sorted by time)
+```
+
+- **Strengths:** massive write throughput (LSM trees), linear scaling by adding nodes, no single leader (in Cassandra), tunable consistency.
+- **Weaknesses:** you must design tables **around your queries** up front; no JOINs; queries must include the partition key; limited transactions.
+- **Examples:** Apache Cassandra, ScyllaDB, HBase, Google Bigtable.
+- **Use for:** chat messages, activity feeds, IoT readings, event logs. Anything write-heavy that's read "by key, in time order".
+
+<Callout type="why" title="Why Discord moved messages to Cassandra (then ScyllaDB)">
+Billions of messages, mostly **written once** and **read by channel, newest first**. That access pattern maps perfectly to "partition by channel, sort by time". They didn't need JOINs on messages. They needed endless write scale.
+</Callout>
+
+## 4. Graph databases
+
+Store **nodes** (things) and **edges** (relationships) directly. Traversing relationships is the main operation.
+
+```text
+(Asha) -[:FOLLOWS]-> (Ravi) -[:FOLLOWS]-> (Meera)
+(Asha) -[:LIKES]-> (Post 12) <-[:WROTE]- (Meera)
+```
+
+"Friends of friends who like the same posts" is a few hops in a graph DB but a nightmare of self-JOINs in SQL.
+
+- **Examples:** Neo4j, Amazon Neptune.
+- **Use for:** social graphs, recommendations, fraud detection (spotting rings of accounts), knowledge graphs.
+
+## Side-by-side
+
+| Type | Data model | Query by | Scale writes | Typical use |
+|---|---|---|---|---|
+| Key-value | key → blob | key only | ⭐⭐⭐ | Cache, sessions, counters |
+| Document | JSON documents | key + secondary indexes | ⭐⭐ | Catalogs, profiles, CMS |
+| Wide-column | partition → sorted rows | partition key (+ range) | ⭐⭐⭐ | Messages, feeds, time-series, logs |
+| Graph | nodes + edges | traversals | ⭐ | Social graphs, recommendations |
+| Relational | tables + relations | anything (SQL) | ⭐ (⭐⭐ with sharding) | Most business data |
+
+<Callout type="mistake">
+"NoSQL is faster and scales better, so I'll use MongoDB." This is a red flag in interviews. A well-indexed PostgreSQL handles a lot. NoSQL databases scale **specific access patterns** well, and only if you design for them. Always justify with the access pattern.
+</Callout>
+
+<Takeaways>
+- **Key-value:** fastest and simplest, lookup by key only.
+- **Document:** flexible JSON, data read together is stored together.
+- **Wide-column:** huge write scale; design around partition key + sort order.
+- **Graph:** relationship traversal.
+- NoSQL trades **query flexibility and/or strict consistency** for **scale and speed** in specific patterns.
+</Takeaways>
+
+<Quiz
+  id="nosql-types"
+  questions={[
+    { q: 'You need to store user sessions looked up only by session ID, with very low latency. Best fit?', options: ['Graph database', 'Key-value store like Redis', 'Wide-column store', 'Data warehouse'], answer: 1, explain: 'Pure lookup by key with tight latency → in-memory key-value store.' },
+    { q: 'A product catalog where shoes have size/colour and laptops have RAM/CPU. Which model handles varying attributes most naturally?', options: ['Key-value', 'Document store', 'Graph', 'Time-series'], answer: 1, explain: 'Documents can each have different fields, so varying attributes fit naturally. (Postgres JSONB is also a valid answer in practice.)' },
+    { q: 'Billions of chat messages, always read as “latest messages in chat X”. Which design fits?', options: ['Wide-column store partitioned by chat_id, sorted by time', 'Graph database', 'One big SQL table without indexes', 'Key-value store with one key per user'], answer: 0, explain: 'This is the textbook wide-column pattern: partition key = chat, clustering key = timestamp.' },
+    { q: 'Which query is a graph database best at?', options: ['Sum of sales per month', 'Friends-of-friends who also like X', 'Get user by ID', 'Store 1M sensor readings per second'], answer: 1, explain: 'Multi-hop relationship traversal is what graph databases are built for.' },
+    { q: 'What do you usually give up with wide-column stores like Cassandra?', options: ['Horizontal scaling', 'Flexible ad-hoc queries and JOINs', 'Fast writes', 'Replication'], answer: 1, explain: 'You must design tables per query pattern; queries without the partition key and JOINs aren’t supported well.' },
+  ]}
+/>

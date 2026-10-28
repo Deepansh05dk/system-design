@@ -1,0 +1,102 @@
+---
+title: What Is a Database (and Why Not Just a JSON File)?
+slug: what-is-a-database
+description: Starting from zero. What problem databases solve, what's inside one, and the vocabulary you'll need for the rest of the course.
+module: m1
+order: 1
+minutes: 12
+---
+
+<Callout type="problem">
+You build a to-do app. You save tasks in a `tasks.json` file on the server. It works great for you. Then 10,000 users sign up. Two users save at the same moment and one user's change disappears. The server crashes mid-write and the file is corrupted. Finding "all tasks due today" means reading the whole 2 GB file. **What went wrong?**
+</Callout>
+
+A plain file is fine for one user. A <Term k="database">database</Term> is software built to solve exactly these problems when **many users** read and write **lots of data** at the same time.
+
+## What a database gives you
+
+| Problem with a plain file | What a database does |
+|---|---|
+| Two people write at once → one change is lost | **Concurrency control:** safely handles thousands of simultaneous readers and writers |
+| Crash halfway through a write → corrupted data | **Durability & crash recovery:** a write-ahead log lets it recover to a correct state |
+| Finding something = reading everything | **Indexes:** jump straight to the rows you need |
+| You write custom code for every question | **Query language:** ask questions like "orders over ₹1000 this week" in one line |
+| Anyone with the file can change anything | **Access control** and **constraints** (e.g. email must be unique) |
+| Data outgrows one disk | **Replication and partitioning** (in many databases) |
+
+<Callout type="frontend">
+You've used storage in the browser: `localStorage` is basically a tiny key-value store, and **IndexedDB** is a real (small) database with transactions and indexes. Server databases are the same idea but built for millions of users, terabytes of data and crash safety.
+</Callout>
+
+## What's inside a database (simplified)
+
+You don't need to build one, but knowing the main parts helps you reason about performance:
+
+<ArchFlow
+  title="The main parts of a database"
+  height={330}
+  nodes={[
+    { id: 'app', label: 'Your app', sub: 'sends a query', kind: 'server', x: 100, y: 165 },
+    { id: 'parser', label: 'Query planner', sub: 'finds the fastest way', kind: 'service', icon: '🧭', x: 320, y: 70 },
+    { id: 'buffer', label: 'Buffer pool', sub: 'hot pages in RAM', kind: 'cache', x: 560, y: 70 },
+    { id: 'wal', label: 'Write-ahead log', sub: 'append-only, for recovery', kind: 'storage', icon: '📜', x: 320, y: 260 },
+    { id: 'disk', label: 'Data files', sub: 'tables + indexes on disk', kind: 'db', x: 780, y: 165 },
+  ]}
+  edges={[
+    { from: 'app', to: 'parser', label: 'SQL' },
+    { from: 'parser', to: 'buffer', label: 'read pages' },
+    { from: 'buffer', to: 'disk', label: 'load if missing' },
+    { from: 'app', to: 'wal', label: 'writes go here first' },
+    { from: 'wal', to: 'disk', label: 'applied later', dashed: true },
+  ]}
+  steps={[
+    { title: 'The app sends a query', text: 'Your server code sends something like <code>SELECT * FROM orders WHERE user_id = 7</code>.', add: ['app'] },
+    { title: 'The planner decides how', text: 'The <b>query planner</b> looks at the available indexes and table statistics to pick the cheapest plan: use an index? scan the table? which JOIN order? (<code>EXPLAIN</code> shows you this plan.)', add: ['parser'], flow: ['app>parser'] },
+    { title: 'Reads come from memory if possible', text: 'Data is stored in fixed-size <b>pages</b> (often 8–16 KB). Recently used pages stay in RAM in the <b>buffer pool</b>. A read that finds its page in RAM is fast; otherwise the page is loaded from disk.', add: ['buffer', 'disk'], flow: ['parser>buffer', 'buffer>disk'] },
+    { title: 'Writes are logged first', text: 'Before changing the data files, every change is appended to the <b>write-ahead log (WAL)</b>. Appending to the end of a file is fast (sequential), and if the server crashes, the DB replays the log to recover. That’s how databases are <b>durable</b>.', add: ['wal'], flow: ['app>wal', 'wal>disk'] },
+  ]}
+/>
+
+That write-ahead log idea shows up everywhere in system design: replication streams the log to other machines, and Kafka is basically "a log as a product".
+
+## Vocabulary you'll need
+
+- **Table / collection:** a group of similar records (users, orders).
+- **Row / record / document:** one item (one user).
+- **Column / field:** one attribute (email).
+- <Term k="schema">**Schema**</Term>: the structure: which fields exist and their types.
+- **Query:** a request to read or change data.
+- <Term k="primary-key">**Primary key**</Term>: a field that uniquely identifies each record (`id`).
+- <Term k="index">**Index**</Term>: a lookup structure to find records fast (next lessons).
+- <Term k="transaction">**Transaction**</Term>: a group of changes that succeed or fail together.
+
+## The two big families
+
+There are many kinds of databases, but they fall into two big families. We'll study both in detail:
+
+<Versus
+  items={[
+    { name: 'Relational (SQL)', icon: '🧮', pros: ['Data in tables with rows and columns', 'Tables linked by keys, combined with JOINs', 'Strong guarantees (ACID transactions)'], use: 'PostgreSQL, MySQL, SQL Server, Oracle' },
+    { name: 'Non-relational (NoSQL)', icon: '🧩', pros: ['Key-value, documents, wide-column, graphs', 'Often easier to spread across many machines', 'Flexible structure'], use: 'Redis, MongoDB, Cassandra, DynamoDB, Neo4j' },
+  ]}
+/>
+
+<Callout type="interview">
+In almost every design interview you will be asked **"which database would you use and why?"** The worst answer is a name without a reason ("MongoDB because it scales"). The best answers connect the choice to the **access pattern**: "Orders need transactions and we query them in many ways, so PostgreSQL. Session data is only looked up by session ID, so Redis." The next lessons give you the reasons.
+</Callout>
+
+<Takeaways>
+- Databases solve **concurrency, durability, fast lookup, querying and scale**, the things plain files can't.
+- Inside: a **query planner**, a **buffer pool** (RAM cache of pages), a **write-ahead log** (for crash safety) and **data files** on disk.
+- Two families: **relational (SQL)** and **NoSQL**. Choose based on how your data is accessed.
+</Takeaways>
+
+<Quiz
+  id="what-is-db"
+  questions={[
+    { q: 'Two users update the same JSON file at the same time and one change disappears. What database feature prevents this?', options: ['Indexes', 'Concurrency control (locking / transactions)', 'Replication', 'Query planner'], answer: 1, explain: 'Databases coordinate simultaneous writers so changes aren’t silently overwritten.' },
+    { q: 'What is the write-ahead log (WAL) for?', options: ['Making reads faster', 'Recording each change before applying it, so the DB can recover after a crash', 'Storing user passwords', 'Load balancing'], answer: 1, explain: 'The WAL is an append-only record of changes. After a crash, the DB replays it to reach a consistent state.' },
+    { q: 'Why do databases keep a “buffer pool” in RAM?', options: ['To store backups', 'Reading pages from memory is far faster than from disk', 'To encrypt data', 'To run the query planner'], answer: 1, explain: 'Memory is roughly 100–1000× faster than disk. Hot pages are kept in RAM.' },
+    { q: 'Which is the best way to answer “which database would you use?” in an interview?', options: ['Name the most popular one', 'Always say NoSQL for scale', 'Tie the choice to the data’s access patterns and guarantees needed', 'Say it doesn’t matter'], answer: 2, explain: 'Interviewers want reasoning: how is data read/written, what consistency is needed, how much scale.' },
+  ]}
+/>

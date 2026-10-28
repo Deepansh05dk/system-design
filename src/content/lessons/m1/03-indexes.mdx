@@ -1,0 +1,92 @@
+---
+title: Database Indexes
+slug: database-indexes
+description: Why the same query can take 2 seconds or 2 milliseconds, how B-tree indexes work, and what indexes cost.
+module: m1
+order: 3
+minutes: 14
+---
+
+<Callout type="problem">
+Your users table has 50 million rows. The login query `SELECT * FROM users WHERE email = 'asha@mail.com'` takes **4 seconds**. Your CPU is fine, your disk is fine. Adding a single line, `CREATE INDEX ON users(email)`, brings it down to **2 milliseconds**. **What just happened?**
+</Callout>
+
+## The phone book idea
+
+Without an index, the database must look at **every row** to find matching emails. That's a **full table scan**.
+
+An <Term k="index">index</Term> is a separate, **sorted** structure that maps a column's values to where the rows live. Like the index at the back of a book: to find "TCP", you don't read the whole book, you look up "T" in the index and jump to page 214.
+
+## See it
+
+<IndexSim />
+
+## How a B-tree index works
+
+Most database indexes are <Term k="btree">B-trees</Term> (more precisely B+ trees):
+
+- Keys are kept **sorted**.
+- Each node is a disk **page** holding hundreds of keys, so the tree is very **wide and shallow**.
+- To find a key you go root → branch → leaf: just **3–4 page reads** even for billions of rows.
+- Because keys are sorted, the same index also speeds up **range queries** (`WHERE created_at > '2026-01-01'`), **sorting** (`ORDER BY`) and **prefix matches** (`LIKE 'ash%'`).
+
+<Callout type="analogy">
+A library: the B-tree root says "A–F: floor 1, G–M: floor 2...". Each floor has a sign for each aisle, each aisle for each shelf. Three signs and you're at the right book, whether the library has a thousand books or a billion.
+</Callout>
+
+## Indexes are not free
+
+<Versus
+  items={[
+    { name: 'Benefits', icon: '🚀', pros: ['Reads on the indexed column become dramatically faster', 'Helps WHERE, JOIN, ORDER BY and range queries', 'Unique indexes enforce uniqueness (no duplicate emails)'] },
+    { name: 'Costs', icon: '💸', cons: ['Every INSERT/UPDATE/DELETE must also update every index → slower writes', 'Extra disk space (sometimes as big as the table)', 'Too many indexes confuse the planner and waste memory'] },
+  ]}
+/>
+
+**Rule of thumb:** index the columns you **filter, join or sort by often**. Don't index everything. A write-heavy table (like a log of events) should have few indexes.
+
+## Composite indexes and column order
+
+An index can cover several columns: `CREATE INDEX ON orders(user_id, created_at)`.
+
+It's sorted by `user_id` first, then by `created_at` within each user. So it helps:
+- ✅ `WHERE user_id = 7`
+- ✅ `WHERE user_id = 7 ORDER BY created_at DESC LIMIT 20` (perfect: "a user's latest orders")
+- ❌ `WHERE created_at > '2026-01-01'` alone (the index isn't sorted by date first)
+
+This is the **leftmost prefix rule**. It's like a phone book sorted by last name, then first name: great for "all Sharmas", useless for "everyone named Priya".
+
+## Other index types (good to know)
+
+| Type | Good for |
+|---|---|
+| **Hash index** | Exact equality lookups only (`=`), no ranges |
+| **Full-text / inverted index** | Searching words inside text (lesson 8) |
+| **Geospatial (R-tree, GiST)** | "Restaurants within 2 km" (Module 3) |
+| **LSM tree** (used by Cassandra, RocksDB) | Very fast writes: buffer in memory, flush sorted files to disk, merge in the background |
+
+<Callout type="deep" title="Going deeper: B-tree vs LSM tree">
+**B-trees** update data in place: great for reads, OK for writes. **LSM trees** (Log-Structured Merge trees) turn all writes into fast sequential appends and merge files later ("compaction"). That's why write-heavy databases like Cassandra, ScyllaDB and RocksDB use LSM trees, while PostgreSQL and MySQL use B-trees. Interview phrase: "write-heavy workload → an LSM-based store like Cassandra."
+</Callout>
+
+<Callout type="interview">
+When you design a table in an interview, **mention the index** that serves the main query: "The main query is 'a user's latest 20 orders', so I'd add an index on `(user_id, created_at DESC)`." This shows you think about how data is read, not just how it's stored.
+</Callout>
+
+<Takeaways>
+- Without an index → **full table scan** (O(N)). With a B-tree index → a few page reads (O(log N)).
+- B-trees keep keys sorted, which also helps **ranges and sorting**.
+- Indexes **speed reads but slow writes** and use space. Index what you query.
+- Composite indexes follow the **leftmost prefix rule**: order the columns to match your queries.
+</Takeaways>
+
+<Quiz
+  id="indexes"
+  questions={[
+    { q: 'Without an index, how does the DB find rows matching WHERE email = ?', options: ['Binary search', 'It checks every row (full table scan)', 'It asks the cache', 'It uses the primary key'], answer: 1, explain: 'With no index on email, the only way is to examine all rows.' },
+    { q: 'You add 6 indexes to a table that receives 50K inserts/sec. What will you likely notice?', options: ['Inserts get faster', 'Inserts get slower because each index must be updated', 'No change', 'Reads get slower'], answer: 1, explain: 'Every write must update every index. Write-heavy tables should have few, carefully chosen indexes.' },
+    { q: 'Index on (user_id, created_at). Which query can NOT use it efficiently?', options: ['WHERE user_id = 5', 'WHERE user_id = 5 ORDER BY created_at DESC', 'WHERE created_at > yesterday (no user_id)', 'WHERE user_id = 5 AND created_at > yesterday'], answer: 2, explain: 'Leftmost prefix rule: the index is sorted by user_id first, so filtering only by created_at can’t use it well.' },
+    { q: 'Why can a B-tree find one row among billions with only ~4 reads?', options: ['It keeps everything in RAM', 'Each node holds hundreds of keys, so the tree is very shallow', 'It uses hashing', 'It reads in parallel'], answer: 1, explain: 'With ~200+ keys per page, 4 levels cover 200⁴ ≈ 1.6 billion keys.' },
+    { q: 'Which storage engine design is typically better for very write-heavy workloads?', options: ['B-tree', 'LSM tree', 'Hash index', 'No index'], answer: 1, explain: 'LSM trees convert writes into sequential appends and merge later, which gives high write throughput.' },
+  ]}
+/>

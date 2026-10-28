@@ -1,0 +1,109 @@
+---
+title: Relational Databases & SQL
+slug: relational-databases-and-sql
+description: Tables, primary and foreign keys, JOINs, and the handful of SQL you actually need to reason about designs.
+module: m1
+order: 2
+minutes: 15
+---
+
+<Callout type="problem">
+An online shop has users, products, orders and reviews. A user has many orders; an order has many products; a product has many reviews. **How do you store this so that nothing is duplicated, everything stays consistent, and you can still ask any question you want later?**
+</Callout>
+
+That's what a <Term k="rdbms">relational database</Term> is for. It has been the default choice for 40+ years, and it's still the right first choice for most products.
+
+## Tables, rows and keys
+
+Data lives in **tables**. Each table has a fixed set of **columns** (the <Term k="schema">schema</Term>) and many **rows**.
+
+- A <Term k="primary-key">**primary key**</Term> uniquely identifies each row: `users.id`.
+- A <Term k="foreign-key">**foreign key**</Term> points to a row in another table: `orders.user_id → users.id`. The database can **enforce** this: you can't create an order for a user that doesn't exist.
+
+This "pointing" is the **relation** in relational database.
+
+## JOIN: combining tables
+
+Because each fact lives in one place, you often need to **combine** tables to answer a question. That's a <Term k="join">JOIN</Term>. Try it:
+
+<JoinVisualizer />
+
+## The SQL you need for system design
+
+You don't need to be a SQL expert for design interviews, but you should be comfortable reading this:
+
+```sql
+-- Create a table with a primary key and a foreign key
+CREATE TABLE orders (
+  id          BIGSERIAL PRIMARY KEY,
+  user_id     BIGINT NOT NULL REFERENCES users(id),
+  status      TEXT NOT NULL DEFAULT 'pending',
+  total_paise BIGINT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Read: the 20 most recent orders of a user
+SELECT id, status, total_paise
+FROM orders
+WHERE user_id = 7
+ORDER BY created_at DESC
+LIMIT 20;
+
+-- Write
+INSERT INTO orders (user_id, total_paise) VALUES (7, 199900);
+UPDATE orders SET status = 'shipped' WHERE id = 991;
+DELETE FROM orders WHERE id = 991;
+```
+
+<Callout type="tip">
+Store money as an **integer of the smallest unit** (paise, cents), never as a floating-point number. `0.1 + 0.2 = 0.30000000000004` is not acceptable in a bank. Interviewers notice this detail.
+</Callout>
+
+## Relationship types
+
+| Type | Example | How it's stored |
+|---|---|---|
+| One-to-one | user ↔ profile | Same table, or a table with a unique foreign key |
+| One-to-many | user → orders | Foreign key on the "many" side (`orders.user_id`) |
+| Many-to-many | students ↔ courses | A **join table** `enrollments(student_id, course_id)` |
+
+The Twitter "follow" relationship is many-to-many: a `follows(follower_id, followee_id)` table. You'll see it again in the News Feed design.
+
+## Why relational databases are so popular
+
+- **Flexible querying:** you don't need to know all your questions upfront. New report? Write a new query.
+- **Strong guarantees:** ACID transactions (next lessons) keep data correct.
+- **Constraints:** unique emails, non-null fields, valid foreign keys, all enforced by the DB, not by hoping your code is right.
+- **Mature:** decades of tooling, backups, monitoring, and people who know it.
+
+## Where they struggle
+
+- **Horizontal write scaling:** a single relational database is one machine for writes. You can scale reads with replicas, but scaling writes needs **sharding**, which makes JOINs and transactions across shards hard (Module 2).
+- **Rigid schema:** changing the structure of a huge table (a "migration") can be slow and must be planned.
+- **Very high write volume** of simple data (like billions of events) can be cheaper in specialized stores.
+
+<Callout type="frontend">
+If you've used Prisma, Drizzle, TypeORM or Sequelize, those are <Term k="orm">ORMs</Term>. They generate SQL for you. Handy, but in design discussions think in terms of the SQL they produce: one ORM call in a loop can quietly create the famous **N+1 query problem** (1 query for the list, then 1 more per item).
+</Callout>
+
+<Callout type="interview">
+"I'll start with **PostgreSQL** because the data is relational (users, orders, payments), we need transactions, and the scale fits on one primary with read replicas for now. If writes outgrow it, we can shard by `user_id`." This sentence covers *what*, *why* and *how it evolves*. That's the pattern you want.
+</Callout>
+
+<Takeaways>
+- Relational DBs store data in **tables**, linked with **primary and foreign keys**.
+- **JOINs** combine tables at query time; each fact is stored once.
+- Strengths: **flexible queries, ACID, constraints, maturity**. Weakness: **scaling writes across many machines** is hard.
+- Default to a relational database unless you have a clear reason not to.
+</Takeaways>
+
+<Quiz
+  id="relational-sql"
+  questions={[
+    { q: 'How do you store a many-to-many relationship like students and courses?', options: ['A comma-separated list in the students table', 'A join table with student_id and course_id', 'Duplicate every course in every student row', 'It cannot be stored in SQL'], answer: 1, explain: 'A join (or junction) table holds one row per pairing, with foreign keys to both tables.' },
+    { q: 'What does a foreign key constraint guarantee?', options: ['The column is encrypted', 'The value must match an existing row in the referenced table', 'Queries are faster', 'The column is unique'], answer: 1, explain: 'It prevents “orphan” rows, e.g. an order for a user that doesn’t exist.' },
+    { q: 'With LEFT JOIN users → orders, what happens to a user with no orders?', options: ['They are excluded', 'They appear once, with NULL in the order columns', 'The query errors', 'They appear with an order of ₹0'], answer: 1, explain: 'LEFT JOIN keeps all rows from the left table; missing right-side values become NULL.' },
+    { q: 'What is the hardest thing to scale in a single relational database?', options: ['Reads', 'Writes across many machines (needs sharding)', 'Number of columns', 'Number of tables'], answer: 1, explain: 'Reads can be scaled with replicas and caches. Writes all go to one primary until you shard, which complicates JOINs and transactions.' },
+    { q: 'How should you store money amounts?', options: ['FLOAT', 'Integer in the smallest currency unit (or a DECIMAL type)', 'String', 'It doesn’t matter'], answer: 1, explain: 'Floating point has rounding errors. Use integers (paise/cents) or exact decimal types.' },
+  ]}
+/>

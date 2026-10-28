@@ -1,0 +1,102 @@
+---
+title: TCP vs UDP
+slug: tcp-vs-udp
+description: Reliable-but-slower vs fast-but-unreliable delivery. See packets get lost, resent and reordered.
+module: m0
+order: 4
+minutes: 14
+---
+
+<Callout type="problem">
+The internet is messy. Data is split into small <Term k="packet">packets</Term>, and each packet may take a different route. Some arrive late, some arrive out of order, some never arrive at all. A bank transfer can't lose a single byte. A video call can't wait for a lost frame from 2 seconds ago. **How do we handle both needs?**
+</Callout>
+
+Two transport <Term k="protocol">protocols</Term> give two different answers: **TCP** and **UDP**.
+
+## TCP: the careful courier
+
+<Term k="tcp">TCP</Term> (Transmission Control Protocol) promises:
+
+1. **Reliable:** every packet arrives. Lost ones are detected and **resent**.
+2. **Ordered:** packets are numbered (sequence numbers) and put back in order.
+3. **Connection-based:** both sides agree to talk first (the handshake).
+4. **Flow & congestion control:** it slows down if the receiver or network is overwhelmed.
+
+### The 3-way handshake
+
+Before any data moves, TCP sets up a connection:
+
+<SequenceFlow
+  title="TCP 3-way handshake"
+  actors={[
+    { id: 'c', label: 'Client', icon: '💻' },
+    { id: 's', label: 'Server', icon: '🖥️' },
+  ]}
+  messages={[
+    { from: 'c', to: 's', label: 'SYN (seq=100)', note: '“I want to talk. My numbering starts at 100.”' },
+    { from: 's', to: 'c', label: 'SYN-ACK (seq=300, ack=101)', note: '“OK! I got your 100. My numbering starts at 300.”' },
+    { from: 'c', to: 's', label: 'ACK (ack=301)', note: '“Got it.” The connection is now open. This cost <b>one full round trip</b> before any real data could be sent.' },
+    { from: 'c', to: 's', label: 'data: GET /index.html', note: 'Now the actual HTTP request flows. Every chunk of data is acknowledged; if an ACK doesn’t come back in time, the sender resends.' },
+    { from: 's', to: 'c', label: 'ACK + response data', dashed: true, note: 'The server acknowledges and replies. To close, both sides exchange FIN messages.' },
+  ]}
+/>
+
+<Callout type="why" title="Why does the handshake matter for system design?">
+Each new TCP connection costs a round trip (plus more for TLS). From India to a US server that's ~200 ms **before any data**. This is why we:
+- **Reuse connections** (HTTP keep-alive, connection pooling to databases)
+- Put servers and CDNs **closer to users**
+- Use newer protocols like **HTTP/3 (QUIC)**, which combine handshakes
+</Callout>
+
+## UDP: the fire-and-forget postcard
+
+<Term k="udp">UDP</Term> (User Datagram Protocol) just sends packets. No handshake, no acknowledgements, no resending, no ordering. If a packet is lost, it's gone. If order matters, the application has to deal with it.
+
+That sounds bad, but it's exactly what some apps want: **speed over perfection**.
+
+## See the difference
+
+Set the packet loss and press **Send**. Watch which packets get lost (💥), which are resent (orange), and what the receiving app actually gets.
+
+<PacketSim />
+
+## When to use which
+
+<Versus
+  items={[
+    { name: 'TCP', icon: '📦', pros: ['Guaranteed delivery', 'Correct order', 'Built-in congestion control'], cons: ['Handshake adds latency', 'One lost packet blocks the ones after it (head-of-line blocking)', 'More overhead'], use: 'Web pages, APIs, file transfer, email, database connections, payments. Anything where every byte matters.' },
+    { name: 'UDP', icon: '✉️', pros: ['No handshake, lowest latency', 'No waiting on lost packets', 'Supports broadcast/multicast'], cons: ['Packets may be lost, duplicated or out of order', 'App must handle reliability if it needs it'], use: 'Video/voice calls, live streaming, online games, DNS lookups. Where fresh data matters more than perfect data.' },
+  ]}
+/>
+
+<Callout type="analogy">
+**TCP** is a phone call: you dial, the other side picks up, and if they miss a word they say "sorry, repeat that?" **UDP** is shouting across a crowded room: fast, but if they missed a word, you're already on the next sentence.
+</Callout>
+
+Why is a video call on UDP? If a video frame from 200 ms ago is lost, resending it is useless because the conversation has moved on. Better to show the next frame. A small glitch beats a frozen screen.
+
+<Callout type="deep" title="Going deeper: QUIC and HTTP/3">
+**QUIC** is a newer protocol built **on top of UDP** that adds reliability, encryption and multiple independent streams in user space. HTTP/3 runs on QUIC. It fixes TCP's head-of-line blocking (one lost packet doesn't stall unrelated streams) and combines the connection + TLS handshake into fewer round trips. Google, YouTube and Cloudflare already use it widely.
+</Callout>
+
+<Callout type="interview">
+Typical prompts: "Design a video calling app" or "Design a multiplayer game". Say **UDP (or WebRTC, which uses UDP) for real-time media**, but **TCP for chat messages, signaling and payments**. Showing you'd use **both** in the same system is a strong signal.
+</Callout>
+
+<Takeaways>
+- **TCP** = reliable, ordered, connection-based. Costs a handshake and can stall on lost packets.
+- **UDP** = fast, simple, no guarantees. Good when fresh data matters more than complete data.
+- Most web traffic (HTTP/1.1, HTTP/2, databases) uses TCP. Real-time media and games use UDP. HTTP/3 uses QUIC over UDP.
+- Connection setup costs round trips → **reuse connections** and **move servers closer to users**.
+</Takeaways>
+
+<Quiz
+  id="tcp-udp"
+  questions={[
+    { q: 'Which protocol would you choose for transferring a bank statement PDF?', options: ['UDP, because it’s faster', 'TCP, because every byte must arrive in order', 'Either, no difference', 'DNS'], answer: 1, explain: 'A missing or reordered byte would corrupt the file. TCP guarantees complete, ordered delivery.' },
+    { q: 'Why do video calls typically use UDP?', options: ['UDP is encrypted', 'Resending an old frame is useless; low latency matters more than perfect delivery', 'TCP cannot carry video', 'UDP uses less bandwidth for the same data'], answer: 1, explain: 'In real-time media, late data is useless data. It’s better to skip a lost frame than to wait for it.' },
+    { q: 'How many round trips does the TCP handshake take before the client can send data?', options: ['0', '1', '3', '5'], answer: 1, explain: 'SYN → SYN-ACK → ACK is “3-way”, but the client can send data right after its ACK, so the cost is about one round trip (RTT).' },
+    { q: 'What is TCP “head-of-line blocking”?', options: ['A server refusing connections', 'A lost packet holding up all the packets behind it until it’s resent', 'The first request always being slow', 'Too many open ports'], answer: 1, explain: 'TCP delivers in order, so if packet 3 is lost, packets 4, 5, 6 wait in a buffer until 3 is resent. QUIC/HTTP3 avoids this across streams.' },
+    { q: 'Your app opens a new database connection for every API request. What’s the main problem?', options: ['Databases cannot handle TCP', 'Each request pays connection setup cost (handshakes, auth). Use a connection pool.', 'UDP would be better for databases', 'Nothing, this is best practice'], answer: 1, explain: 'Opening connections is expensive. Connection pools keep connections open and reuse them.' },
+  ]}
+/>

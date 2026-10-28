@@ -1,0 +1,109 @@
+---
+title: Specialized Databases & Connection Pooling
+slug: specialized-databases
+description: Time-series, graph, in-memory and analytics (OLAP) stores, plus connection pooling, the boring detail that takes systems down.
+module: m1
+order: 9
+minutes: 12
+---
+
+<Callout type="problem">
+Your monitoring system stores CPU usage of 10,000 servers every 10 seconds: that's 86 million rows a day, and the main question is always "average over the last hour". Your analytics team runs "revenue by city by month for 3 years", which locks up the production DB for 5 minutes. **General-purpose databases struggle with both. Specialized ones exist for exactly these jobs.**
+</Callout>
+
+## OLTP vs OLAP: two very different workloads
+
+| | OLTP (transactions) | OLAP (analytics) |
+|---|---|---|
+| Typical query | "Get order #991", "insert payment" | "Total revenue per city per month" |
+| Rows touched | A few | Millions to billions |
+| Users | Your app, many tiny queries | Analysts, dashboards, few huge queries |
+| Storage layout | **Row-oriented** (whole row together) | **Column-oriented** (each column together) |
+| Examples | PostgreSQL, MySQL | Snowflake, BigQuery, Redshift, ClickHouse |
+
+**Why columns?** "Sum of `amount`" only needs the `amount` column. A column store reads just that column (compressed very well because values are similar) instead of every full row.
+
+<Callout type="tip">
+Never run heavy analytics on your production database. Copy data to a **data warehouse** (nightly, or continuously via CDC) and let analysts hammer that instead. In interviews: "analytics go to a separate OLAP store so they never slow down user-facing queries."
+</Callout>
+
+## Time-series databases
+
+Data that is **append-only, timestamped**, and queried by **time ranges**: metrics, IoT sensors, stock prices, app logs.
+
+- Optimized for **high-rate inserts** and "last 1h / 24h" queries.
+- **Downsampling:** keep per-second data for 7 days, per-minute for 90 days, per-hour forever.
+- **Retention policies** that drop old data automatically.
+- Examples: **Prometheus**, InfluxDB, TimescaleDB (a Postgres extension), ClickHouse.
+
+## Graph databases (recap)
+
+For relationship-heavy queries many hops deep: social networks, recommendations, fraud rings. Neo4j, Amazon Neptune. Note that many big companies still store the social graph in sharded SQL/KV stores and **precompute** recommendations offline. A graph DB is a valid choice, not the only one.
+
+## In-memory databases
+
+**Redis** and **Memcached** keep everything in RAM: sub-millisecond reads, ~100K+ ops/sec per node.
+- Memcached: simple cache, key → string.
+- Redis: rich data structures (lists, sets, **sorted sets** for leaderboards, hashes, streams, HyperLogLog, geo indexes), optional persistence, replication, pub/sub.
+
+RAM is expensive and limited, so in-memory stores usually hold **hot data** or **derived data**, not everything.
+
+## Object storage (preview)
+
+Files (images, videos, backups) don't belong in a database. They go to **object storage** like Amazon S3, with only the **URL/key** stored in the database. Full lesson in Module 2.
+
+## Connection pooling: the silent killer
+
+Every database connection costs memory and setup time (TCP + TLS + authentication). PostgreSQL creates a whole **process** per connection, and comfortably handles only a few hundred connections.
+
+Now imagine 200 app servers × 50 connections each = **10,000 connections**. The database spends its memory on connections instead of data, and falls over.
+
+A <Term k="connection-pool">connection pool</Term> keeps a small set of open connections and **lends them out** to requests:
+
+<ArchFlow
+  title="Many app requests, few database connections"
+  height={280}
+  nodes={[
+    { id: 'a1', label: 'App server 1', kind: 'server', x: 110, y: 60 },
+    { id: 'a2', label: 'App server 2', kind: 'server', x: 110, y: 140 },
+    { id: 'a3', label: 'App server 3', kind: 'server', x: 110, y: 220 },
+    { id: 'pool', label: 'PgBouncer', sub: 'connection pooler', kind: 'lb', icon: '🏊', x: 440, y: 140 },
+    { id: 'db', label: 'PostgreSQL', sub: '~100 real connections', kind: 'db', x: 760, y: 140 },
+  ]}
+  edges={[
+    { from: 'a1', to: 'pool', label: '1000s of client conns' },
+    { from: 'a2', to: 'pool' },
+    { from: 'a3', to: 'pool' },
+    { from: 'pool', to: 'db', label: 'small reused pool' },
+  ]}
+/>
+
+- **In-app pools** (HikariCP, the pool inside Prisma/pg/SQLAlchemy) reuse connections inside one process.
+- **External poolers** (PgBouncer, RDS Proxy) sit between many app servers and the DB.
+- **Serverless functions** (Lambda, Vercel functions) are famous for exhausting DB connections because each instance opens its own. They need an external pooler or a serverless-friendly driver.
+
+<Callout type="frontend">
+If you've deployed a Next.js app with Prisma to serverless and seen "too many connections" errors, this is exactly why. The fix is a pooler (e.g. PgBouncer, Prisma Accelerate, Neon's pooled endpoint).
+</Callout>
+
+<Callout type="interview">
+Mentioning connection pooling when you scale out app servers ("we'll put PgBouncer in front of Postgres so 200 app servers don't exhaust connections") is a small detail that signals real-world experience.
+</Callout>
+
+<Takeaways>
+- **OLTP** (row stores) for app traffic; **OLAP** (column stores, warehouses) for analytics. Keep them separate.
+- **Time-series DBs** for timestamped metrics with downsampling and retention.
+- **In-memory stores** (Redis) for hot data and rich data structures.
+- **Files go to object storage**, not into the DB.
+- **Connection pooling** protects databases from too many connections.
+</Takeaways>
+
+<Quiz
+  id="specialized-db"
+  questions={[
+    { q: 'Analysts run “revenue per city per month for 3 years” on the production DB and the app slows down. Best fix?', options: ['Add more indexes to production', 'Replicate data to a column-oriented data warehouse for analytics', 'Use Redis', 'Run it at night on production'], answer: 1, explain: 'OLAP workloads belong in a separate warehouse (column store) so they never hurt user-facing traffic.' },
+    { q: 'Why are column-oriented stores fast for “SUM(amount)” over billions of rows?', options: ['They keep everything in RAM', 'They read only the needed column, which also compresses very well', 'They use B-trees', 'They skip rows randomly'], answer: 1, explain: 'Reading one compressed column is far less I/O than reading every full row.' },
+    { q: 'Which is the best fit for “CPU usage per server every 10 s, queried by last hour”?', options: ['Graph DB', 'Time-series DB', 'Document DB', 'Object storage'], answer: 1, explain: 'Timestamped, append-only, time-range queries, downsampling: the time-series sweet spot.' },
+    { q: '300 serverless functions each open a DB connection and Postgres crashes. What helps?', options: ['A bigger CPU', 'An external connection pooler like PgBouncer / RDS Proxy', 'More indexes', 'Switching to UDP'], answer: 1, explain: 'A pooler multiplexes many client connections onto a small number of real DB connections.' },
+  ]}
+/>

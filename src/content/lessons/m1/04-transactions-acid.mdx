@@ -1,0 +1,102 @@
+---
+title: Transactions & ACID
+slug: transactions-and-acid
+description: How databases keep money from vanishing. Atomicity, Consistency, Isolation, Durability, plus isolation levels in plain English.
+module: m1
+order: 4
+minutes: 16
+---
+
+<Callout type="problem">
+Transferring ₹200 from Account A to B is **two** updates: subtract from A, add to B. What if the server crashes between them? What if two people withdraw from the same account at the same millisecond? In a bank, an e-commerce checkout or a ticket booking, these aren't edge cases. They happen **every day** at scale.
+</Callout>
+
+A <Term k="transaction">transaction</Term> groups several operations into **one unit**: either all of them happen, or none do.
+
+```sql
+BEGIN;
+UPDATE accounts SET balance = balance - 200 WHERE id = 'A';
+UPDATE accounts SET balance = balance + 200 WHERE id = 'B';
+COMMIT;   -- or ROLLBACK; to undo everything
+```
+
+## Break it yourself
+
+<AcidSim />
+
+## ACID, one letter at a time
+
+<Term k="acid">ACID</Term> is the set of guarantees relational databases give for transactions:
+
+| Letter | Means | In plain English | Bank example |
+|---|---|---|---|
+| **A**tomicity | All or nothing | If any step fails, every step is undone | Never debit A without crediting B |
+| **C**onsistency | Rules always hold | Data moves from one valid state to another; constraints are never broken | Balance can't go below 0 if there's a `CHECK (balance >= 0)` rule |
+| **I**solation | Transactions don't step on each other | Running at the same time gives the same result as running one after another (at the strongest level) | Two withdrawals can't both spend the same ₹1000 |
+| **D**urability | Committed = saved | Once you get "COMMIT OK", the data survives crashes and power cuts | Your transfer isn't lost if the server reboots |
+
+<Callout type="analogy">
+**Atomicity** is like an online purchase: either you get the item **and** pay, or neither happens. **Isolation** is like a changing room with a lock: while you're inside, nobody else can walk in. **Durability** is like a signed receipt: once you have it, the purchase is on record.
+</Callout>
+
+## Isolation levels (the tricky one)
+
+Perfect isolation is slow, because transactions have to wait for each other. So databases offer **levels**: weaker levels allow more parallelism but also allow some anomalies.
+
+| Level | Prevents | Still possible | Notes |
+|---|---|---|---|
+| Read Uncommitted | — | Dirty reads (seeing data that may be rolled back) | Almost never used |
+| **Read Committed** | Dirty reads | Non-repeatable reads, lost updates (without locks) | **PostgreSQL's default** |
+| **Repeatable Read** | + non-repeatable reads | Some anomalies (write skew) | **MySQL InnoDB's default** |
+| **Serializable** | Everything | — | Safest, slowest; transactions may be aborted and must be retried |
+
+What the anomalies mean:
+- **Dirty read:** you read a change that hasn't been committed yet (and might be undone).
+- **Non-repeatable read:** you read the same row twice in one transaction and get different values.
+- **Lost update:** two transactions read the same value, both write, and one write silently overwrites the other (our withdrawal example).
+
+### How to avoid lost updates in practice
+
+1. **Atomic updates:** `UPDATE accounts SET balance = balance - 800 WHERE id = 'A' AND balance >= 800;` One statement, checked and updated together. Check the "rows affected" count.
+2. **Pessimistic locking:** `SELECT ... FOR UPDATE` locks the row until your transaction ends.
+3. **Optimistic locking:** keep a `version` column; `UPDATE ... SET version = version + 1 WHERE id = ? AND version = 5`. If 0 rows changed, someone else won. Retry.
+4. **Serializable isolation:** let the database detect conflicts and abort one transaction.
+
+We'll come back to locking in the Concurrency lesson and in the Ticket Booking design.
+
+<Callout type="why" title="Why not just always use Serializable?">
+It's the safest, but transactions may get aborted more often and must be retried, and throughput drops under contention. Most apps use **Read Committed** plus targeted fixes (atomic updates, row locks, optimistic versions) on the few places where races matter: balances, inventory, seat bookings.
+</Callout>
+
+## ACID vs BASE
+
+Many NoSQL and distributed systems relax these guarantees to scale and stay available. The opposite acronym is **BASE**:
+- **B**asically **A**vailable: the system keeps responding even during failures.
+- **S**oft state: data may change over time as replicas sync.
+- **E**ventually consistent: copies agree **eventually**, not instantly.
+
+A "like" counter can be BASE: nobody cares if it shows 1,203 vs 1,204 for a second. Your bank balance must be ACID.
+
+<Callout type="interview">
+Whenever money, inventory or seats appear in a problem, say the words: **"This needs a transaction"** and explain **which race** you're preventing (double-spend, overselling, double-booking) and **how** (atomic conditional update, row lock, or optimistic version check). This is one of the most common follow-ups in interviews.
+</Callout>
+
+<Takeaways>
+- A **transaction** = several operations that succeed or fail as one.
+- **ACID** = Atomicity (all-or-nothing), Consistency (rules hold), Isolation (no interference), Durability (committed = saved).
+- Isolation has **levels**; weaker = faster but allows anomalies like **lost updates**.
+- Prevent races with **atomic updates, row locks or optimistic versioning**.
+- **BASE** systems trade strict guarantees for scale and availability. Choose per feature.
+</Takeaways>
+
+<Quiz
+  id="acid"
+  questions={[
+    { q: 'The server crashes after debiting A but before crediting B. Which ACID property ensures A is restored?', options: ['Consistency', 'Atomicity', 'Isolation', 'Durability'], answer: 1, explain: 'Atomicity: an uncommitted transaction is rolled back entirely.' },
+    { q: 'You receive “COMMIT successful”, then the database server loses power. Which property guarantees the data is still there?', options: ['Atomicity', 'Isolation', 'Durability', 'Consistency'], answer: 2, explain: 'Durability: committed data was written to the log on disk before COMMIT returned.' },
+    { q: 'Two users book the last seat at the same time and both succeed. Which property was weak?', options: ['Durability', 'Isolation', 'Atomicity', 'Availability'], answer: 1, explain: 'Their transactions interfered with each other. Better isolation or locking prevents double-booking.' },
+    { q: 'Which single SQL statement safely withdraws ₹800 only if the balance allows?', options: ['SELECT balance; then UPDATE balance = new_value', 'UPDATE accounts SET balance = balance - 800 WHERE id = ? AND balance >= 800', 'DELETE FROM accounts', 'INSERT a new balance row'], answer: 1, explain: 'The check and the update happen atomically in one statement. If 0 rows are affected, funds were insufficient.' },
+    { q: 'Which feature is a good fit for BASE / eventual consistency?', options: ['Bank transfers', 'Seat booking', 'Like counts on a post', 'Inventory for the last item'], answer: 2, explain: 'A like count being briefly off by one harms nobody. Money and inventory need strong guarantees.' },
+    { q: 'What is optimistic locking?', options: ['Locking every row you read', 'Checking a version number on update and retrying if it changed', 'Never using transactions', 'Using a cache'], answer: 1, explain: 'You don’t lock up front; you detect conflicts at write time via a version column.' },
+  ]}
+/>

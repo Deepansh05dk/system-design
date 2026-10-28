@@ -1,0 +1,70 @@
+---
+title: Network Layers (OSI & TCP/IP) Made Simple
+slug: network-layers
+description: Why networking is split into layers, what each layer adds, and the only parts you really need for system design.
+module: m0
+order: 3
+minutes: 10
+---
+
+<Callout type="problem">
+Sending a web page across the world involves Wi-Fi radios, cables under the ocean, routers, operating systems and your browser. Nobody can understand all of that at once. **How do engineers keep this manageable?**
+</Callout>
+
+The answer is **layers**. Each layer solves one problem and trusts the layer below it to handle the rest. You already think like this as a frontend dev: your React component doesn't care how the browser paints pixels on the GPU.
+
+## The layers you actually need
+
+Textbooks teach the 7-layer **OSI model**. In practice the internet uses the simpler **TCP/IP model**. For system design, you mostly care about **4 layers**:
+
+| Layer | OSI # | Job | Examples | Address used |
+|---|---|---|---|---|
+| **Application** | 7 | What the message means | HTTP, HTTPS, DNS, WebSocket, gRPC | URLs, domain names |
+| **Transport** | 4 | Deliver data between *programs*; reliability | TCP, UDP | Ports |
+| **Network** | 3 | Route data between *machines* across the internet | IP | IP addresses |
+| **Link / Physical** | 2 / 1 | Move bits over a wire or radio to the next device | Ethernet, Wi-Fi | MAC addresses |
+
+OSI layers 5 and 6 (session and presentation) are folded into the application layer in real life. TLS (the encryption in HTTPS) sits between transport and application.
+
+## Encapsulation: wrapping like nested envelopes
+
+When you send data, each layer **wraps** the data from the layer above with its own header, like putting a letter in an envelope, then that envelope in a courier bag, then in a shipping box. The receiver unwraps them in reverse.
+
+<EncapsulationSim />
+
+<Callout type="analogy">
+You write a letter (HTTP message). You put it in an envelope with an apartment number (TCP port). The envelope goes into a bag with the building's address (IP). The courier puts it on a truck with the next sorting center's location (MAC address). At each sorting center the truck changes, but the building address stays the same.
+</Callout>
+
+## Why system designers care: L4 vs L7
+
+The most common place layers come up in interviews is **load balancers**:
+
+<Versus
+  items={[
+    { name: 'Layer 4 load balancer', icon: '🚚', pros: ['Looks only at IP + port', 'Very fast, very cheap', 'Works for any protocol (databases, games, etc.)'], cons: ['Cannot see URLs, headers or cookies', 'Cannot route /api to one service and /images to another'], use: 'You need raw speed or are balancing non-HTTP traffic.' },
+    { name: 'Layer 7 load balancer', icon: '🧠', pros: ['Reads the HTTP request: path, headers, cookies', 'Smart routing: /api → API servers, /video → video servers', 'Can terminate TLS, cache, compress, add auth'], cons: ['More CPU work per request', 'Slightly higher latency'], use: 'Typical web apps and microservices (most interview designs).' },
+  ]}
+/>
+
+We'll come back to this in the Load Balancers lesson. For now, remember: **"L4 = routes by address, L7 = routes by content."**
+
+<Callout type="interview">
+If an interviewer says "L7 load balancer" or "L4 proxy", they mean the layer it works at. Saying "I'd use an L7 load balancer so I can route by URL path to different services" shows you understand the difference.
+</Callout>
+
+<Takeaways>
+- Networking is split into layers; each one adds a header and trusts the layers below.
+- The 4 that matter: **Application (HTTP)**, **Transport (TCP/UDP, ports)**, **Network (IP)**, **Link (Wi-Fi/Ethernet)**.
+- **L4** devices see IP + port. **L7** devices understand HTTP and can route by URL, header or cookie.
+</Takeaways>
+
+<Quiz
+  id="network-layers"
+  questions={[
+    { q: 'Which layer is responsible for getting data to the right program using ports?', options: ['Application', 'Transport', 'Network', 'Link'], answer: 1, explain: 'TCP and UDP (transport layer) use port numbers to deliver data to the right program.' },
+    { q: 'You want /api/* requests to go to API servers and /static/* to go to file servers. What do you need?', options: ['An L4 load balancer', 'An L7 load balancer', 'A different IP for each path', 'UDP'], answer: 1, explain: 'Only a layer 7 (HTTP-aware) load balancer can read the URL path and route on it.' },
+    { q: 'What does IP (network layer) add to a packet?', options: ['Port numbers', 'Source and destination IP addresses', 'The HTML content', 'Encryption keys'], answer: 1, explain: 'The IP header carries source and destination IP addresses so routers can forward packets across networks.' },
+    { q: 'What is “encapsulation”?', options: ['Encrypting data', 'Each layer wrapping the data from the layer above with its own header', 'Compressing packets', 'Splitting servers into containers'], answer: 1, explain: 'Like nested envelopes: HTTP inside TCP inside IP inside an Ethernet/Wi-Fi frame.' },
+  ]}
+/>

@@ -1,0 +1,93 @@
+---
+title: Latency, Throughput & Bandwidth
+slug: latency-throughput-bandwidth
+description: The three words used to describe “fast”, why averages lie, and the speed numbers every engineer should know.
+module: m0
+order: 6
+minutes: 12
+---
+
+<Callout type="problem">
+Your manager says "the app is slow". What does that actually mean? Each page takes long to load? The server can't handle many users at once? Big files download slowly? These are **three different problems** with **three different fixes**.
+</Callout>
+
+## Three words, three meanings
+
+| Word | Question it answers | Unit | Analogy (a highway) |
+|---|---|---|---|
+| <Term k="latency">Latency</Term> | How long does **one** request take? | milliseconds (ms) | How long one car takes to drive from A to B |
+| <Term k="throughput">Throughput</Term> | How **many** requests are completed per second? | requests/sec (<Term k="qps">QPS</Term>) | How many cars arrive at B per hour |
+| <Term k="bandwidth">Bandwidth</Term> | What's the **maximum** data the link can carry? | bits/sec (Mbps, Gbps) | How many lanes the highway has |
+
+They're related but not the same:
+- Adding lanes (bandwidth) doesn't make one car faster (latency).
+- A highway can have great throughput and still terrible latency if it's very long (a cable under the ocean).
+
+<Callout type="frontend">
+In Chrome DevTools' Network tab, **"Waiting (TTFB)"** is mostly server latency and **"Content Download"** depends on bandwidth. Lighthouse's throttling simulates both: higher latency per request and lower bandwidth.
+</Callout>
+
+## Round-trip time (RTT)
+
+<Term k="rtt">RTT</Term> is the time for a message to go to the server and the answer to come back. It's limited by **physics**: light in fiber travels about 200,000 km/s. Mumbai → New York is ~12,500 km, so even a perfect straight cable needs ~60 ms one way, ~125 ms round trip. Real routes are longer, so ~200 ms is normal.
+
+**You cannot make light faster.** The only fix for distance is to **move data closer to users** (CDNs, edge servers, multiple regions).
+
+## The numbers every engineer should know
+
+You don't need exact values, but you should know the **orders of magnitude**. Toggle "human scale" to feel how huge the differences are:
+
+<LatencyNumbers />
+
+From this chart come most of the core rules of system design:
+
+1. **Memory is far faster than disk** → cache hot data in memory (Redis).
+2. **Sequential reads are much faster than random reads** → databases and logs (like Kafka) write sequentially.
+3. **Network round trips are expensive** → batch requests, avoid "chatty" APIs, keep services that talk a lot close together.
+4. **Crossing continents is very expensive** → CDNs and multi-region deployments.
+
+## Averages lie: percentiles
+
+Suppose 100 requests: 99 take 50 ms, 1 takes 5,000 ms. The average is ~100 ms, which looks fine! But one user in a hundred waits **5 seconds**.
+
+That's why engineers measure **percentiles**:
+
+| Metric | Meaning |
+|---|---|
+| **p50** (median) | Half the requests are faster than this. The "typical" experience. |
+| **p95** | 95% are faster. The "bad day" experience. |
+| <Term k="p99">**p99**</Term> | 99% are faster. The slowest 1%, which is often your **heaviest users** (more data, more items in cart). |
+
+<Callout type="why" title="Why p99 matters more than you think">
+A page that calls 10 backend services in parallel is as slow as the **slowest** one. If each service has a 1% chance of being slow, the page has roughly a **10%** chance of being slow (1 − 0.99¹⁰ ≈ 9.6%). This is called **tail latency amplification**. Big companies set goals like "p99 under 200 ms".
+</Callout>
+
+## Latency vs throughput trade-offs
+
+Some techniques improve one at the cost of the other:
+
+- **Batching** (send 100 items in one request): throughput ↑, but the first item waits for the batch → latency ↑.
+- **Queues** (accept work now, process later): throughput and resilience ↑, but the result arrives later.
+- **Compression:** less data over the network, but CPU time to compress and decompress.
+
+<Callout type="interview">
+In the requirements phase, turn "fast" into numbers: "Feed should load in **under 200 ms at p99**" or "We need to handle **50K writes/sec** at peak". Naming **which** metric matters shapes the whole design: low latency pushes you toward caches and CDNs; high throughput pushes you toward queues, batching and horizontal scaling.
+</Callout>
+
+<Takeaways>
+- **Latency** = time per request. **Throughput** = requests per second. **Bandwidth** = max capacity of the link.
+- Distance costs latency that no hardware can fix → **put data close to users**.
+- Rough orders: **memory (ns) ≪ SSD (µs) ≪ network in a data center (~0.5 ms) ≪ cross-continent (~100–200 ms)**.
+- Measure **p95/p99**, not averages.
+</Takeaways>
+
+<Quiz
+  id="latency-throughput"
+  questions={[
+    { q: 'Upgrading a server’s network from 1 Gbps to 10 Gbps mainly improves…', options: ['Latency of a single small request', 'Bandwidth (and maybe throughput for large transfers)', 'Round-trip time to another continent', 'p99 latency of database queries'], answer: 1, explain: 'More bandwidth is more lanes. It helps move lots of data, but doesn’t make one small request travel faster.' },
+    { q: 'Users in Australia complain your US-hosted site is slow, even though servers are idle. Best fix?', options: ['Bigger servers', 'Serve content from locations closer to Australia (CDN / regional servers)', 'Use UDP', 'Add database indexes'], answer: 1, explain: 'Idle servers + far-away users = distance latency. Only moving data closer fixes physics.' },
+    { q: 'Your average latency is 80 ms but users still complain. What should you check?', options: ['p50', 'p99 / tail latency', 'Bandwidth', 'DNS TTL'], answer: 1, explain: 'Averages hide slow outliers. p95/p99 show what your unhappiest users see.' },
+    { q: 'Roughly how much faster is reading from memory than a round trip inside a data center?', options: ['About the same', '~10×', '~5,000×', '~1 million×'], answer: 2, explain: 'Main memory ≈ 100 ns; data-center round trip ≈ 500,000 ns. That gap is why in-memory caches on the same machine (or one hop away) are so valuable.' },
+    { q: 'Batching 100 writes into one request usually…', options: ['Lowers both latency and throughput', 'Raises throughput but can raise latency for individual items', 'Has no effect', 'Lowers bandwidth'], answer: 1, explain: 'Fewer round trips → more work per second, but each item may wait for the batch to fill.' },
+  ]}
+/>

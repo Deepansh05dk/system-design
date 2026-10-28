@@ -1,0 +1,121 @@
+---
+title: HTTP & HTTPS
+slug: http-and-https
+description: The language of the web. Methods, status codes, headers, HTTP/1.1 vs 2 vs 3, and how TLS keeps it secure.
+module: m0
+order: 5
+minutes: 16
+---
+
+<Callout type="problem">
+TCP gives us a reliable pipe of bytes, but the bytes need a **meaning**. How does a server know you want a product page and not to delete your account? How does a browser know the response is JSON, or that it can cache it for 60 seconds? And how do we stop someone on the café Wi-Fi from reading your password?
+</Callout>
+
+<Term k="http">HTTP</Term> gives the bytes meaning. <Term k="https">HTTPS</Term> adds encryption. As a frontend dev you use HTTP daily. This lesson fills in the parts that matter for **designing systems**.
+
+## The shape of HTTP
+
+HTTP is **request → response**. The client always starts. A request has:
+- a **method** (what to do): GET, POST, PUT, PATCH, DELETE
+- a **path** (on what): `/api/products/42`
+- **headers** (extra info): auth tokens, content type, caching hints
+- an optional **body** (data): JSON, form data, a file
+
+The response has a **status code**, headers, and a body. Play with it:
+
+<HttpExplorer />
+
+### Two properties interviewers love
+
+- **Safe:** doesn't change anything on the server (GET, HEAD).
+- **Idempotent:** doing it once or 10 times has the **same end result** (GET, PUT, DELETE). POST is **not** idempotent: send "create order" twice and you get two orders.
+
+<Callout type="why" title="Why idempotency matters">
+Networks fail. A client sends a request, the connection drops, and the client doesn't know if the server got it. **Should it retry?** For GET/PUT/DELETE, yes, it's safe. For POST (like "pay ₹500"), a retry could charge twice! We'll fix this with **idempotency keys** in Module 3.
+</Callout>
+
+## HTTP is stateless
+
+Each HTTP request is independent. The server doesn't automatically remember your previous request. To build "logged-in" experiences, we send identity with **every** request, using cookies or tokens in headers.
+
+This "statelessness" is a gift for scaling: if no server needs to remember you, **any server can handle any request**, so we can add servers freely behind a load balancer.
+
+## Caching headers (huge for performance)
+
+| Header | What it does |
+|---|---|
+| `Cache-Control: max-age=3600` | "You may reuse this for 1 hour without asking me." |
+| `Cache-Control: no-store` | "Never cache this" (bank pages). |
+| `ETag: "a1b2c3"` | A fingerprint of the content. The browser can later ask `If-None-Match: "a1b2c3"` and get a tiny **304 Not Modified** if nothing changed. |
+| `Cache-Control: public, s-maxage=600` | CDNs (shared caches) may keep it for 10 minutes. |
+
+CDNs and browsers rely on these headers. Good headers mean fewer requests reach your servers at all.
+
+## HTTP/1.1 vs HTTP/2 vs HTTP/3
+
+| | HTTP/1.1 (1997) | HTTP/2 (2015) | HTTP/3 (2022) |
+|---|---|---|---|
+| Transport | TCP | TCP | QUIC (on UDP) |
+| Format | Plain text | Binary frames | Binary frames |
+| Requests per connection | One at a time (browsers open ~6 connections per domain) | **Many in parallel** (multiplexing) | Many in parallel, and independent |
+| Header compression | No | Yes (HPACK) | Yes (QPACK) |
+| Head-of-line blocking | Yes (per connection) | Fixed at HTTP level, still at TCP level | Fixed |
+
+<Callout type="frontend">
+Remember bundling all JS into one file and making image sprites? That was mostly a workaround for HTTP/1.1's "one request at a time per connection" limit. With HTTP/2 multiplexing, many small files are much less costly. That's also why domain sharding (cdn1, cdn2, cdn3...) is an outdated trick.
+</Callout>
+
+## HTTPS and TLS: how the padlock works
+
+HTTPS = HTTP inside a <Term k="tls">TLS</Term> tunnel. TLS gives three guarantees:
+
+1. **Encryption:** nobody in the middle can read the data.
+2. **Integrity:** nobody can change the data without being detected.
+3. **Authentication:** you're really talking to `bank.com`, proven by a **certificate** signed by a trusted Certificate Authority (CA).
+
+<SequenceFlow
+  title="TLS 1.3 handshake (simplified)"
+  actors={[
+    { id: 'c', label: 'Browser', icon: '💻' },
+    { id: 's', label: 'bank.com', icon: '🏦' },
+  ]}
+  messages={[
+    { from: 'c', to: 's', label: 'ClientHello + my key share', note: 'The browser says which encryption methods it supports and sends its half of a key exchange (Diffie-Hellman).' },
+    { from: 's', to: 'c', label: 'ServerHello + key share + certificate', dashed: true, note: 'The server picks a method, sends its half of the key exchange and its <b>certificate</b>. Both sides can now compute the same secret key without ever sending it over the network.' },
+    { from: 'c', to: 'c', label: 'verify certificate', note: 'The browser checks the certificate was signed by a trusted Certificate Authority and matches <code>bank.com</code>. If not, you see the scary “Your connection is not private” page.' },
+    { from: 'c', to: 's', label: 'Finished + encrypted HTTP request', note: 'Done in <b>1 round trip</b> (TLS 1.3). Everything from now on is encrypted with fast symmetric encryption.' },
+  ]}
+/>
+
+<Callout type="deep" title="Going deeper: asymmetric vs symmetric encryption">
+**Asymmetric** (public/private key) crypto is used during the handshake to agree on a secret safely and to verify the certificate. It's slow. **Symmetric** crypto (one shared key, like AES) is used for the actual data because it's very fast. TLS uses the slow one only to set up the fast one.
+</Callout>
+
+### TLS termination
+
+Decrypting TLS costs CPU. In most designs, the **load balancer terminates TLS**: it decrypts incoming HTTPS and forwards plain HTTP to app servers inside the private network (or re-encrypts if security rules require it). This keeps certificates in one place and frees app servers from crypto work.
+
+<Callout type="interview">
+In designs, write the client → load balancer arrow as **HTTPS** and say "TLS terminates at the load balancer." When a design involves retries, mention which endpoints are **idempotent**. These small details show maturity.
+</Callout>
+
+<Takeaways>
+- HTTP = method + path + headers + body → status + headers + body. It's **stateless**, which makes horizontal scaling easy.
+- Know your status code families: **2xx ok, 3xx redirect/cache, 4xx client error, 5xx server error**. Especially 301/302, 304, 401/403, 429, 503.
+- **Idempotent** methods (GET, PUT, DELETE) are safe to retry; **POST is not**.
+- **Caching headers** (Cache-Control, ETag) let browsers and CDNs skip your servers.
+- HTTP/2 multiplexes requests on one connection; HTTP/3 runs on QUIC (UDP).
+- **TLS** gives encryption, integrity and authentication, usually **terminated at the load balancer**.
+</Takeaways>
+
+<Quiz
+  id="http-https"
+  questions={[
+    { q: 'A user’s “Place order” POST timed out. The client automatically retries. What risk does this create?', options: ['None, POST is idempotent', 'A duplicate order, because POST is not idempotent', 'The server will return 304', 'The TLS session will break'], answer: 1, explain: 'POST creates something each time. Without protection (like an idempotency key), retries can create duplicates.' },
+    { q: 'Which status code should a rate limiter return?', options: ['403 Forbidden', '404 Not Found', '429 Too Many Requests', '500 Internal Server Error'], answer: 2, explain: '429 means “slow down”. Often paired with a Retry-After header.' },
+    { q: 'User is logged in but tries to open an admin-only page. Correct status?', options: ['401 Unauthorized', '403 Forbidden', '400 Bad Request', '502 Bad Gateway'], answer: 1, explain: '401 = we don’t know who you are. 403 = we know who you are, but you’re not allowed.' },
+    { q: 'Why is HTTP being stateless good for scaling?', options: ['It makes requests smaller', 'Any server can handle any request, so we can add servers behind a load balancer freely', 'It removes the need for TLS', 'It makes caching impossible'], answer: 1, explain: 'If no server holds per-user memory between requests, requests can go to whichever server is free.' },
+    { q: 'What does “TLS termination at the load balancer” mean?', options: ['The LB blocks HTTPS', 'The LB decrypts HTTPS and forwards requests to servers inside the private network', 'TLS is turned off', 'Each server has its own certificate'], answer: 1, explain: 'The load balancer handles the crypto work and certificates; app servers receive already-decrypted requests.' },
+    { q: 'What problem did HTTP/2 multiplexing solve?', options: ['Encryption', 'Only one request at a time per connection in HTTP/1.1', 'DNS lookups', 'Packet loss on UDP'], answer: 1, explain: 'HTTP/2 can send many requests and responses at the same time over a single TCP connection.' },
+  ]}
+/>

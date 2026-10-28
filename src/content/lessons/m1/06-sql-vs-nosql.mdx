@@ -1,0 +1,84 @@
+---
+title: "SQL vs NoSQL: How to Decide"
+slug: sql-vs-nosql
+description: A practical decision framework for the most common question in system design interviews.
+module: m1
+order: 6
+minutes: 12
+---
+
+<Callout type="problem">
+"Which database would you use?" comes up in **every** system design interview. There's rarely one right answer, but there are definitely **wrong reasons**. Let's build a framework you can apply in 30 seconds.
+</Callout>
+
+## Start from the access pattern, not the brand
+
+Ask these questions about the data:
+
+1. **What are the main reads and writes?** (by ID? by user, sorted by time? complex filters?)
+2. **How much data and traffic?** Read-heavy or write-heavy?
+3. **What consistency is needed?** Is a stale read okay for a few seconds? Is money involved?
+4. **How related is the data?** Lots of JOINs, or self-contained records?
+5. **How stable is the structure?** Fixed fields or wildly varying?
+
+Try the helper. Answer for a feature you know, like "the orders in an e-commerce app" or "chat messages":
+
+<DbChooser />
+
+## The core trade-off
+
+<Versus
+  items={[
+    { name: 'SQL (relational)', icon: '🧮', pros: ['ACID transactions across rows and tables', 'Flexible queries, JOINs, aggregations', 'Schema and constraints protect data quality', 'Huge ecosystem, well understood'], cons: ['Scaling writes needs sharding (manual work)', 'Schema changes on huge tables need care'], use: 'Business data with relations and correctness needs: users, orders, payments, inventory, bookings.' },
+    { name: 'NoSQL', icon: '🧩', pros: ['Designed to scale out across many machines', 'High write throughput (wide-column, KV)', 'Flexible schema (document)', 'Very low latency for simple key lookups'], cons: ['Limited or no JOINs; you design data per query', 'Often weaker or limited transactions', 'Data duplication must be kept in sync by you'], use: 'Huge volume with simple, known access patterns: messages, feeds, events, sessions, caches, catalogs.' },
+  ]}
+/>
+
+## Common real-world pairings
+
+| Feature | Typical choice | Why |
+|---|---|---|
+| Users, accounts, orders, payments | PostgreSQL / MySQL | Relations + transactions |
+| Sessions, cache, rate-limit counters | Redis | Key lookup, in-memory speed, TTLs |
+| Chat messages, activity feeds | Cassandra / ScyllaDB / DynamoDB | Write-heavy, read by partition + time |
+| Product catalog | MongoDB or Postgres with JSONB | Varying attributes |
+| Search box | Elasticsearch / OpenSearch | Full-text ranking |
+| Friend recommendations | Graph DB (or precomputed in batch jobs) | Multi-hop relationships |
+| Metrics / monitoring | Prometheus, TimescaleDB, InfluxDB | Time-series |
+| Images, videos, files | Object storage (S3) | Big blobs, cheap, durable |
+
+Large systems use **several** of these at once. This is called **polyglot persistence**: use the right store for each job.
+
+<Callout type="why" title="Modern blur: the lines are fading">
+PostgreSQL has JSONB (documents) and full-text search. MongoDB has multi-document ACID transactions. "NewSQL" / distributed SQL databases (Google Spanner, CockroachDB, YugabyteDB, TiDB) give SQL + ACID **and** horizontal scaling, at the cost of higher write latency and operational complexity. In interviews, it's fine to mention these as an option when you need both SQL guarantees and global scale.
+</Callout>
+
+## A sample interview answer
+
+> "For **orders and payments** I'll use **PostgreSQL**: we need transactions so we never charge without creating an order, and the support team needs flexible queries. At our scale (~2K writes/sec), one primary with read replicas is enough. Later we can shard by `user_id`.
+>
+> For the **activity feed** I'll use **Cassandra**: it's write-heavy, each user's feed is read newest-first, and we never JOIN it. Partition key `user_id`, clustering key `created_at DESC`.
+>
+> **Sessions** go in **Redis** with a TTL."
+
+Notice each choice has a **because**.
+
+<Callout type="mistake">
+Avoid: "NoSQL because it scales" (so does sharded SQL), "MongoDB because it's schemaless" (you still have a schema, just in your code), "SQL because I know it" (fine in real life, weak in an interview). Tie the choice to **access pattern, consistency and scale**.
+</Callout>
+
+<Takeaways>
+- Decide from **access patterns, consistency needs, scale and relationships**, not from popularity.
+- **Default to relational** for core business data; reach for NoSQL when a specific pattern needs scale or flexibility.
+- Real systems are **polyglot**: several stores, each with a clear reason.
+</Takeaways>
+
+<Quiz
+  id="sql-vs-nosql"
+  questions={[
+    { q: 'An e-commerce checkout must create an order, reduce stock and record a payment together. Best primary store?', options: ['Redis', 'Relational DB with transactions', 'Elasticsearch', 'Graph DB'], answer: 1, explain: 'Multiple related writes that must succeed together → ACID transactions in a relational database.' },
+    { q: 'Which is the WEAKEST reason to pick a database in an interview?', options: ['Write-heavy, read by partition + time', 'Needs multi-row transactions', 'It’s the most popular database right now', 'Only looked up by key with a TTL'], answer: 2, explain: 'Popularity says nothing about whether it fits the access pattern.' },
+    { q: 'What is “polyglot persistence”?', options: ['Using one database for everything', 'Using different databases for different parts of the system, each where it fits best', 'Storing data in many languages', 'Replicating one DB in many regions'], answer: 1, explain: 'E.g. Postgres for orders, Redis for sessions, Elasticsearch for search, S3 for images.' },
+    { q: 'You need SQL with ACID AND horizontal scaling across regions. What category might you mention?', options: ['Key-value stores', 'Distributed SQL / NewSQL (Spanner, CockroachDB)', 'Graph databases', 'Time-series databases'], answer: 1, explain: 'Distributed SQL databases provide SQL + transactions with built-in sharding and replication.' },
+  ]}
+/>

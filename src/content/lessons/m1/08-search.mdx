@@ -1,0 +1,92 @@
+---
+title: Search Engines & the Inverted Index
+slug: search-and-inverted-index
+description: Why LIKE '%shoes%' doesn't scale, how full-text search really works, and how Elasticsearch fits next to your main database.
+module: m1
+order: 8
+minutes: 12
+---
+
+<Callout type="problem">
+Your shop has 20 million products. A user types "red running shoes". You try `SELECT * FROM products WHERE title LIKE '%red%' AND title LIKE '%running%' ...`. It takes 12 seconds, it can't rank results by relevance, it misses "Running Shoe – Red", and a typo like "runing" finds nothing. **How do Amazon and Google search instantly?**
+</Callout>
+
+## Why normal indexes don't help
+
+A B-tree index is sorted by the **whole value** from the start. It helps `LIKE 'red%'` (prefix) but not `LIKE '%shoes%'` (a word in the middle). The database is back to scanning every row.
+
+## The inverted index
+
+An <Term k="inverted-index">inverted index</Term> flips the problem around. Instead of "document → words", it stores **"word → list of documents containing it"**. Exactly like the index at the back of a textbook.
+
+<InvertedIndexDemo />
+
+To search "red running shoes": fetch the list for `red`, the list for `running`, the list for `shoes`, then combine and rank them. Each lookup is a fast key lookup, no matter how many documents exist.
+
+## What a search engine adds on top
+
+1. **Tokenizing:** split text into words.
+2. **Normalizing:** lowercase, remove accents, drop stop words ("the", "for").
+3. **Stemming:** "running", "runs", "ran" → "run".
+4. **Synonyms:** "tee" ↔ "t-shirt".
+5. **Fuzzy matching:** "runing" still finds "running" (edit distance).
+6. **Relevance scoring:** BM25 / TF-IDF. Rare words count more than common ones; matches in the title count more than in the description. Plus business signals like popularity and rating.
+7. **Facets & filters:** "Brand: Nike (120), Size: 9 (45)".
+
+## Where search fits in a system
+
+Search engines like **Elasticsearch** or **OpenSearch** are usually **not** the source of truth. The main database is. The search index is a **derived copy** kept in sync:
+
+<ArchFlow
+  title="Keeping a search index in sync"
+  height={300}
+  nodes={[
+    { id: 'app', label: 'Product service', kind: 'service', x: 110, y: 90 },
+    { id: 'db', label: 'PostgreSQL', sub: 'source of truth', kind: 'db', x: 380, y: 90 },
+    { id: 'q', label: 'Change stream', sub: 'CDC / Kafka', kind: 'queue', x: 380, y: 230 },
+    { id: 'idx', label: 'Indexer worker', kind: 'worker', x: 620, y: 230 },
+    { id: 'es', label: 'Elasticsearch', sub: 'search index', kind: 'search', x: 800, y: 90 },
+    { id: 'user', label: 'Search API', kind: 'client', x: 620, y: 90 },
+  ]}
+  edges={[
+    { from: 'app', to: 'db', label: 'writes' },
+    { from: 'db', to: 'q', label: 'change events' },
+    { from: 'q', to: 'idx' },
+    { from: 'idx', to: 'es', label: 'update docs' },
+    { from: 'user', to: 'es', label: 'query' },
+  ]}
+  steps={[
+    { title: 'Writes go to the main database', text: 'Product changes are written to PostgreSQL, the <b>source of truth</b>.', add: ['app', 'db'], flow: ['app>db'] },
+    { title: 'Changes are captured', text: 'Each change is published as an event. A common technique is <b>CDC (Change Data Capture)</b>, which reads the database’s write-ahead log (tools like Debezium) and pushes events to Kafka.', add: ['q'], flow: ['db>q'] },
+    { title: 'An indexer updates the search engine', text: 'A worker consumes events and updates documents in Elasticsearch. The index is usually <b>a few seconds behind</b>, which is fine for search.', add: ['idx', 'es'], flow: ['q>idx', 'idx>es'] },
+    { title: 'Searches hit the search engine only', text: 'Search queries go to Elasticsearch, keeping heavy text queries away from the main database. If the index is ever corrupted, rebuild it from the database.', add: ['user'], flow: ['user>es'] },
+  ]}
+/>
+
+<Callout type="why" title="Why not write to both the DB and Elasticsearch directly from the app?">
+"Dual writes" break easily: if the DB write succeeds and the Elasticsearch write fails (or the app crashes in between), they disagree forever. Capturing changes **from the database's log** (CDC) or using an **outbox table** guarantees every committed change eventually reaches the index.
+</Callout>
+
+<Callout type="frontend">
+The search box in your app is the frontend half of this. Debouncing keystrokes, showing results while typing (typeahead) and highlighting matched words all build on what the search engine returns. We'll design a full **Typeahead / Autocomplete** system in Module 7.
+</Callout>
+
+<Callout type="interview">
+Whenever a design has a search box ("search tweets", "search products", "search restaurants by name"), say: **"Full-text search goes to Elasticsearch, fed asynchronously from the primary DB via CDC/Kafka. The search index is eventually consistent, which is acceptable here."**
+</Callout>
+
+<Takeaways>
+- B-tree indexes can't find words in the middle of text; **inverted indexes** map word → documents.
+- Search engines add **stemming, fuzzy matching, ranking (BM25) and facets**.
+- Search is a **derived store**, synced from the source of truth via **CDC / events**. Avoid dual writes.
+</Takeaways>
+
+<Quiz
+  id="search"
+  questions={[
+    { q: 'Why is WHERE title LIKE "%shoes%" slow on a big table even with a B-tree index on title?', options: ['LIKE is not supported', 'A leading wildcard can’t use the sorted index, so it scans every row', 'B-trees only work on numbers', 'The query planner is broken'], answer: 1, explain: 'B-trees are sorted from the first character. “%shoes%” could start anywhere, so the DB scans.' },
+    { q: 'What does an inverted index store?', options: ['Documents sorted by date', 'Each word → list of documents containing it', 'Each document → its size', 'Reversed strings'], answer: 1, explain: 'It’s “inverted” because it maps from content (words) back to documents.' },
+    { q: 'What is the usual role of Elasticsearch in a design?', options: ['Primary source of truth for orders', 'A derived search index fed from the main database', 'A cache for sessions', 'A message queue'], answer: 1, explain: 'It’s optimized for search, not as the system of record. It can be rebuilt from the source of truth.' },
+    { q: 'Why is “dual write” (app writes to DB, then to search) risky?', options: ['It’s too slow', 'If one write fails or the app crashes between them, the stores disagree permanently', 'Elasticsearch rejects it', 'It needs UDP'], answer: 1, explain: 'There is no shared transaction. CDC or an outbox pattern gives reliable, eventual sync.' },
+  ]}
+/>

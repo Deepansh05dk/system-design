@@ -1,0 +1,111 @@
+---
+title: Back-of-the-Envelope Estimation
+slug: back-of-the-envelope-estimation
+description: Quick math to size a system (QPS, storage, bandwidth, servers) and the reference numbers that make it easy.
+module: m0
+order: 7
+minutes: 15
+---
+
+<Callout type="problem">
+"Design Twitter." Should it run on one server or 10,000? Does the data fit on one disk or a thousand? You can't make good design choices until you know roughly **how big** the problem is. Interviewers expect you to work this out in 3–5 minutes, out loud, without a calculator.
+</Callout>
+
+Estimation is not about being exact. It's about getting the **order of magnitude** right (1K vs 100K vs 10M QPS), because that decides the architecture.
+
+## Reference numbers to memorize
+
+### Powers of two and data sizes
+
+| Power | Exact value | Approx | Name |
+|---|---|---|---|
+| 2¹⁰ | 1,024 | 1 thousand | 1 KB |
+| 2²⁰ | 1,048,576 | 1 million | 1 MB |
+| 2³⁰ | | 1 billion | 1 GB |
+| 2⁴⁰ | | 1 trillion | 1 TB |
+| 2⁵⁰ | | 1 quadrillion | 1 PB |
+
+### Handy sizes
+
+| Thing | Rough size |
+|---|---|
+| A character (ASCII) | 1 byte |
+| A number (int64) / timestamp | 8 bytes |
+| A UUID | 16 bytes |
+| A tweet / short text + metadata | ~0.5–1 KB |
+| A compressed photo | ~200 KB – 2 MB |
+| 1 minute of HD video | ~50–100 MB |
+
+### Time
+
+- **1 day = 86,400 seconds ≈ 100,000 (10⁵) seconds**. This one shortcut makes everything easy.
+- 1 month ≈ 2.5 million seconds. 1 year ≈ 30 million seconds.
+- 1 million requests/day ≈ **12 requests/sec**. 1 billion/day ≈ **12K/sec**.
+
+### What one machine can roughly do (very rough!)
+
+| Component | Ballpark |
+|---|---|
+| Web/app server | 1K–10K simple requests/sec |
+| SQL database (one node) | ~1K–10K queries/sec depending on query |
+| Redis (in-memory) | ~100K+ operations/sec |
+| Kafka broker | hundreds of MB/sec of writes |
+
+## The recipe
+
+1. **Users:** Start from daily active users (<Term k="dau">DAU</Term>).
+2. **Traffic:** DAU × actions per user ÷ 86,400 ≈ average QPS. Split into reads and writes.
+3. **Peak:** Multiply by 2–5× (traffic isn't flat; evenings and events spike).
+4. **Storage:** writes per day × size per write × days kept × replication factor.
+5. **Bandwidth:** QPS × size per request.
+6. **Conclude:** what does this number mean for the design?
+
+The last step is the one people forget. **Numbers are only useful if they change a decision.**
+
+## Try it
+
+Pick a preset or type your own numbers. The "show your work" box is exactly how you'd say it in an interview.
+
+<EstimationCalc />
+
+## Worked example: Twitter-scale
+
+> 200M DAU. Each user posts ~2 tweets/day and reads ~100 tweets/day. A tweet is ~1 KB with metadata.
+
+- **Writes:** 200M × 2 = 400M tweets/day ÷ 10⁵ ≈ **4,000 writes/sec** (peak ~12K).
+- **Reads:** 200M × 100 = 20B reads/day ÷ 10⁵ ≈ **200,000 reads/sec** (peak ~600K).
+- **Storage:** 400M × 1 KB = 400 GB/day → ×365 ≈ **146 TB/year** (×3 replicas ≈ 440 TB/year), ignoring media.
+
+**What this tells us:**
+- Reads are **50× more than writes** → this is a **read-heavy** system. Invest in **caching** and precomputing timelines.
+- 600K reads/sec is far too many for one database → we need **caches, replicas and sharding**.
+- Hundreds of TB → data must be **spread across many machines**.
+
+<Callout type="tip">
+Round aggressively. 86,400 → 100,000. 365 → 400 (or keep 365, whatever's easier for you). Saying "about 4K QPS" is better than spending a minute computing 4,629.6.
+</Callout>
+
+<Callout type="mistake">
+Spending 15 minutes on estimation. Interviewers want to see you **can** do it and that you use the result. Keep it to ~3–5 minutes, then ask "Does this scale sound right to you?" Some interviewers even say "skip the math". That's fine too.
+</Callout>
+
+<Callout type="interview">
+Signals interviewers look for: (1) you state assumptions clearly ("assume 10% of users post daily"), (2) you separate **read vs write** traffic, (3) you consider **peak**, not just average, and (4) you **draw a conclusion** ("read-heavy, so caching is critical").
+</Callout>
+
+<Takeaways>
+- **1 day ≈ 100K seconds.** 1M/day ≈ 12/sec.
+- Recipe: DAU → QPS (read/write split) → peak → storage → bandwidth → **conclusion**.
+- The point is **order of magnitude** and what it means for the design: read-heavy vs write-heavy, one machine vs many.
+</Takeaways>
+
+<Quiz
+  id="estimation"
+  questions={[
+    { q: 'An app gets 100 million requests per day. Roughly what is the average QPS?', options: ['~100', '~1,000', '~10,000', '~100,000'], answer: 1, explain: '100M ÷ 100K seconds ≈ 1,000 QPS. (Exact: 100M ÷ 86,400 ≈ 1,157.)' },
+    { q: '10M new photos/day at 500 KB each, kept for 5 years. Roughly how much storage (ignoring replication)?', options: ['~9 TB', '~90 TB', '~9 PB', '~900 PB'], answer: 2, explain: '10M × 500 KB = 5 TB/day. × 365 × 5 ≈ 9,125 TB ≈ 9 PB.' },
+    { q: 'Your estimate shows 100 reads for every write. What does that suggest?', options: ['Optimize the write path first', 'It is read-heavy, so caching and read replicas will help a lot', 'Use UDP', 'No database needed'], answer: 1, explain: 'Read-heavy systems benefit most from caches, CDNs, read replicas and precomputed results.' },
+    { q: 'Why multiply average QPS by a “peak factor”?', options: ['To impress the interviewer', 'Traffic is uneven; you must survive the busiest moments, not the average', 'To account for replication', 'Because of TCP overhead'], answer: 1, explain: 'Systems fail at peak. Evening hours, sales and live events can be several times the average.' },
+    { q: 'What is the most important final step of estimation?', options: ['Getting exact numbers', 'Converting to bits', 'Stating what the numbers mean for the design', 'Writing the numbers in a table'], answer: 2, explain: 'Numbers only matter if they drive decisions: caching, sharding, number of servers, storage tier.' },
+  ]}
+/>

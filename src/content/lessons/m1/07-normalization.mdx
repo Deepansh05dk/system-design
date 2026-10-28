@@ -1,0 +1,70 @@
+---
+title: Normalization vs Denormalization
+slug: normalization-vs-denormalization
+description: Store each fact once (safe) or copy data for fast reads (fast)? The trade-off behind feeds, counters and caches.
+module: m1
+order: 7
+minutes: 11
+---
+
+<Callout type="problem">
+To show a feed of 50 posts, you need each post's text, the author's name and avatar, the like count and the comment count. In a "clean" database that's a JOIN across 4 tables, for every feed load, for millions of users. **Should we copy the author's name into every post to skip the JOIN? What happens when the author changes their name?**
+</Callout>
+
+## Normalization: every fact in one place
+
+<Term k="normalization">Normalization</Term> means organizing data so each fact is stored **exactly once**, and everything else refers to it by ID. The customer's email lives in the `customers` table only; orders just store `customer_id`.
+
+## Denormalization: copy for speed
+
+<Term k="denormalization">Denormalization</Term> means **deliberately duplicating** data so reads don't need JOINs or extra lookups: copy the author's name into each post, keep a `like_count` column instead of counting rows in `likes` every time.
+
+Try updating an email in both designs:
+
+<NormalizationDemo />
+
+## The trade-off
+
+<Versus
+  items={[
+    { name: 'Normalized', icon: '🧹', pros: ['No duplicates → no contradictions', 'Writes are simple: update one place', 'Less storage'], cons: ['Reads need JOINs or multiple lookups', 'JOINs get expensive at huge scale or across shards'], use: 'Write-heavy or correctness-critical data. The default starting point for relational schemas.' },
+    { name: 'Denormalized', icon: '⚡', pros: ['Reads are fast: one lookup gets everything', 'Works well with NoSQL / sharded data where JOINs are hard'], cons: ['Updates must change many copies', 'Copies can go out of sync', 'More storage'], use: 'Read-heavy paths where speed matters more than instant consistency: feeds, counters, search indexes, dashboards.' },
+  ]}
+/>
+
+## Common denormalization patterns you'll use in designs
+
+1. **Counters:** store `like_count` on the post and increment it, instead of `COUNT(*)` over millions of likes per page view.
+2. **Precomputed feeds:** store each user's timeline as a ready list of post IDs (the "fan-out on write" idea in the News Feed design).
+3. **Embedded snapshots:** an order stores the **price at the time of purchase**. This is actually *correct* duplication: if the product price changes later, the old order must not change!
+4. **Read models:** a separate store optimized for reading (search index, cache, materialized view), updated from the main database. This is the idea behind **CQRS** (Module 4).
+
+<Callout type="tip">
+Not all duplication is bad. Ask: **"If the original changes, should the copy change too?"** Author name on a post: yes, so you need a way to update copies (or accept a delay). Price on an old invoice: no, the copy is a historical record.
+</Callout>
+
+## How to keep copies in sync
+
+- **In the same transaction** (only if everything is in one database).
+- **Asynchronously with events:** "user renamed" event → a background worker updates copies. Copies are stale for a few seconds (eventual consistency).
+- **Don't copy, cache:** keep data normalized and put a **cache** in front of the slow read. The cache is a temporary copy that expires (TTL) or is invalidated.
+
+<Callout type="interview">
+A strong pattern: **"Source of truth is normalized in PostgreSQL. For the hot read path, I'll denormalize into a cache / read store, updated asynchronously. A few seconds of staleness is acceptable for this feature."** Always state **what's the source of truth** and **how stale copies can be**.
+</Callout>
+
+<Takeaways>
+- **Normalize** for correctness and simple writes; **denormalize** for fast reads.
+- Denormalization moves work from **read time to write time**, and adds the job of keeping copies in sync.
+- Keep a clear **source of truth**; treat copies (caches, counters, feeds, search indexes) as derived data.
+</Takeaways>
+
+<Quiz
+  id="normalization"
+  questions={[
+    { q: 'Storing the customer’s email in every order row is an example of…', options: ['Normalization', 'Denormalization', 'Sharding', 'Indexing'], answer: 1, explain: 'The same fact is duplicated in many rows, which speeds reads but complicates updates.' },
+    { q: 'What is an “update anomaly”?', options: ['A failed backup', 'Copies of the same fact disagree because only some were updated', 'A slow query', 'A missing index'], answer: 1, explain: 'With duplicates, a partial update leaves contradictory data.' },
+    { q: 'An order stores the product price at purchase time even though products has a price too. Is this bad duplication?', options: ['Yes, always normalize', 'No, it’s a historical snapshot that must NOT change when the product price changes', 'Yes, it wastes space', 'Only in NoSQL'], answer: 1, explain: 'The order records what was actually charged. It is a different fact from today’s price.' },
+    { q: 'Why keep a like_count column instead of COUNT(*) on likes?', options: ['COUNT(*) is not valid SQL', 'Counting millions of rows per page view is expensive; a stored counter is O(1) to read', 'It’s more consistent', 'It uses less storage'], answer: 1, explain: 'Classic denormalization: pay a little on each write (increment) to make the very frequent read cheap.' },
+  ]}
+/>

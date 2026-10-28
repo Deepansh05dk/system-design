@@ -1,0 +1,128 @@
+---
+title: IP Addresses, Ports & DNS
+slug: ip-ports-and-dns
+description: How machines find each other on the internet, how one machine runs many services, and how names become numbers.
+module: m0
+order: 2
+minutes: 14
+---
+
+<Callout type="problem">
+There are billions of devices on the internet. When your browser wants to talk to Netflix, how does the message know **which machine** to go to? And once it gets there, how does it know **which program** on that machine should handle it?
+</Callout>
+
+Two ideas answer this: **IP addresses** (which machine) and **ports** (which program on the machine). A third, **DNS**, lets humans use names instead of numbers.
+
+## IP address: the machine's postal address
+
+Every device connected to a network gets an <Term k="ip">IP address</Term>. Routers on the internet read the destination IP and pass the message along, hop by hop, until it reaches that machine, just like the postal system reads a pin code and city.
+
+| Version | Example | How many addresses | Notes |
+|---|---|---|---|
+| IPv4 | `142.250.183.14` | ~4.3 billion (2³²) | Four numbers 0–255. We ran out long ago. |
+| IPv6 | `2404:6800:4009:82b::200e` | 2¹²⁸ (practically unlimited) | Slowly replacing IPv4. |
+
+### Public vs private IPs
+
+Your laptop at home probably has an IP like `192.168.1.5`. That's a **private** IP that works only inside your home network. Your router has one **public** IP that the internet sees, and it translates between them (this is called **NAT**, Network Address Translation).
+
+<Callout type="analogy">
+A big office building has one street address (the public IP). Inside, each desk has an internal extension number (the private IP). The receptionist (router/NAT) knows which desk to route each delivery to.
+</Callout>
+
+In system design this matters because your servers inside a data center usually have **private IPs**. Only the load balancer (or gateway) has a public IP. This hides your servers and makes them safer.
+
+## Ports: which program on the machine?
+
+One server can run many programs at the same time: a web server, a database, an SSH service. A <Term k="port">port</Term> is a number (0–65535) that tells the machine **which program** should get the incoming data.
+
+An address is really **IP + port**, e.g. `54.239.28.85:443`.
+
+| Port | Used by |
+|---|---|
+| 80 | HTTP (plain web) |
+| 443 | HTTPS (secure web) |
+| 22 | SSH (remote login) |
+| 5432 | PostgreSQL database |
+| 3306 | MySQL database |
+| 6379 | Redis cache |
+| 27017 | MongoDB |
+
+<Callout type="frontend">
+When you run `npm run dev` and open `http://localhost:5173`, `localhost` is the IP `127.0.0.1` (your own machine) and `5173` is the port your dev server listens on. Running two dev servers? They need different ports, because only one program can listen on a given port.
+</Callout>
+
+## DNS: the internet's phone book
+
+Humans remember `netflix.com`; machines need `54.155.178.5`. <Term k="dns">DNS</Term> (Domain Name System) translates names to IP addresses.
+
+DNS is not one server. It's a **hierarchy** spread across the world, so no single machine has to know every domain. Step through a lookup for `www.netflix.com`:
+
+<SequenceFlow
+  title="Resolving www.netflix.com (first time, nothing cached)"
+  actors={[
+    { id: 'b', label: 'Browser/OS', icon: '💻' },
+    { id: 'r', label: 'DNS Resolver', icon: '📖' },
+    { id: 'root', label: 'Root server', icon: '🌳' },
+    { id: 'tld', label: '.com server', icon: '🏷️' },
+    { id: 'auth', label: 'netflix.com NS', icon: '🎬' },
+  ]}
+  messages={[
+    { from: 'b', to: 'r', label: 'IP of www.netflix.com?', note: 'Your OS asks a <b>recursive resolver</b>, usually run by your ISP or a public one like Google <code>8.8.8.8</code> or Cloudflare <code>1.1.1.1</code>. It does the hard work for you.' },
+    { from: 'r', to: 'root', label: 'who handles .com?', note: 'The resolver starts at a <b>root server</b>. There are 13 root server names, each backed by hundreds of machines worldwide. Roots don’t know netflix.com, but they know who runs <code>.com</code>.' },
+    { from: 'root', to: 'r', label: 'ask the .com servers', dashed: true, note: 'The root replies with the address of the <b>TLD (Top-Level Domain)</b> servers for <code>.com</code>.' },
+    { from: 'r', to: 'tld', label: 'who handles netflix.com?', note: 'The resolver asks the <code>.com</code> TLD server.' },
+    { from: 'tld', to: 'r', label: 'ask Netflix’s name servers', dashed: true, note: 'The TLD server knows which <b>authoritative name servers</b> Netflix registered for its domain.' },
+    { from: 'r', to: 'auth', label: 'IP of www.netflix.com?', note: 'Finally the resolver asks Netflix’s own (authoritative) name server, which has the real answer.' },
+    { from: 'auth', to: 'r', label: '54.155.178.5 (TTL 60s)', dashed: true, note: 'The answer comes with a <b>TTL (time to live)</b>: how long everyone may cache it.' },
+    { from: 'r', to: 'b', label: '54.155.178.5', dashed: true, note: 'The resolver caches the answer and returns it. Next time, anyone using this resolver gets the answer instantly from cache. Your browser and OS cache it too.' },
+  ]}
+/>
+
+### DNS caching and TTL
+
+A full lookup can take 100+ ms, so DNS answers are **cached at every level**: browser, operating system, router and resolver. Each record has a **TTL**. Short TTL (e.g. 60 s) means changes spread quickly but more lookups happen. Long TTL (e.g. 1 day) means fewer lookups, but if you change your server's IP, some users keep going to the old one until their cache expires.
+
+<Callout type="why" title="Why this matters in system design">
+DNS is often the **first** layer of load balancing and failover:
+- **DNS load balancing:** return different IPs to different users (round robin) so traffic spreads across servers or data centers.
+- **GeoDNS:** return the IP of the data center closest to the user (users in India get the Mumbai IP, users in the US get the Virginia IP).
+- **Failover:** if a data center dies, update DNS to point elsewhere. But TTL caching means some users are stuck for a while, which is why DNS failover is **slow** compared to a load balancer.
+</Callout>
+
+### Common DNS record types
+
+| Record | Maps | Example |
+|---|---|---|
+| A | name → IPv4 | `netflix.com → 54.155.178.5` |
+| AAAA | name → IPv6 | `netflix.com → 2a05:d018:...` |
+| CNAME | name → another name (alias) | `www.shop.com → shop.vercel-dns.com` |
+| MX | domain → mail server | `gmail.com → smtp.google.com` |
+| NS | domain → its name servers | `netflix.com → ns-81.awsdns-10.com` |
+
+<Callout type="frontend">
+When you deploy a site to Vercel or Netlify and add a custom domain, they ask you to add a **CNAME** or an **A record**. Now you know why: you're telling DNS "my name points to their servers".
+</Callout>
+
+<Callout type="interview">
+You rarely design DNS itself, but you **use** it in designs. Good phrases: "We'll use **GeoDNS** to route users to the nearest region." "DNS-based failover is slow because of TTL caching, so inside a region we rely on load balancers for fast failover."
+</Callout>
+
+<Takeaways>
+- **IP address** = which machine. **Port** = which program on that machine. Together: `IP:port`.
+- Servers in a data center usually have **private IPs**; only the entry point (load balancer) is public.
+- **DNS** turns names into IPs using a hierarchy: resolver → root → TLD → authoritative.
+- DNS answers are **cached using TTL**. Great for speed, bad for fast failover.
+- DNS can do simple load balancing and **geo-routing**.
+</Takeaways>
+
+<Quiz
+  id="ip-ports-dns"
+  questions={[
+    { q: 'A server runs both a web app and a PostgreSQL database. How does incoming data reach the correct program?', options: ['Different IP addresses for each', 'Different ports (e.g. 443 and 5432)', 'DNS decides', 'The load balancer reads the body'], answer: 1, explain: 'The IP gets you to the machine; the port picks the program. 443 for HTTPS, 5432 for PostgreSQL.' },
+    { q: 'You changed your server’s IP and updated DNS, but some users still hit the old server for hours. Why?', options: ['DNS is broken', 'Their cached DNS answer has not expired yet (TTL)', 'The load balancer is caching it', 'IPv6 problem'], answer: 1, explain: 'Resolvers, OSes and browsers cache DNS records until the TTL expires. A long TTL means slow propagation of changes.' },
+    { q: 'Which DNS server actually knows the IP of www.netflix.com?', options: ['Root server', '.com TLD server', 'Netflix’s authoritative name server', 'Your browser'], answer: 2, explain: 'Root and TLD servers only point you further down. The authoritative server for netflix.com holds the real record.' },
+    { q: 'Why do app servers in a data center usually have private IPs?', options: ['Private IPs are faster', 'To hide them from the internet; only the load balancer is public', 'Public IPs cost too much to route', 'DNS cannot map to them'], answer: 1, explain: 'Exposing only the entry point (load balancer/gateway) reduces the attack surface and lets you change servers freely.' },
+    { q: 'You want users in India to reach your Mumbai data center and users in the US to reach Virginia. What helps most?', options: ['A longer TTL', 'GeoDNS', 'A CNAME record', 'Using port 443'], answer: 1, explain: 'GeoDNS returns different IPs depending on where the request comes from, routing users to the nearest region.' },
+  ]}
+/>
