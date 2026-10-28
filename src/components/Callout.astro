@@ -1,0 +1,54 @@
+---
+interface Props {
+  type?: 'problem' | 'analogy' | 'frontend' | 'tip' | 'warn' | 'interview' | 'why' | 'info' | 'deep' | 'mistake';
+  title?: string;
+}
+const defaults = {
+  problem: { icon: '🔥', title: 'The Problem', tone: 'bad' },
+  analogy: { icon: '💡', title: 'Real-life analogy', tone: 'warn' },
+  frontend: { icon: '🖥️', title: 'You already know this (frontend link)', tone: 'info' },
+  tip: { icon: '✅', title: 'Tip', tone: 'good' },
+  warn: { icon: '⚠️', title: 'Watch out', tone: 'warn' },
+  interview: { icon: '🎤', title: 'Interview angle', tone: 'pink' },
+  why: { icon: '🤔', title: 'Why this, not that?', tone: 'purple' },
+  info: { icon: 'ℹ️', title: 'Note', tone: 'info' },
+  deep: { icon: '🔬', title: 'Going deeper', tone: 'purple' },
+  mistake: { icon: '❌', title: 'Common mistake', tone: 'bad' },
+} as const;
+const { type = 'info', title } = Astro.props;
+const d = defaults[type];
+---
+
+<aside class={`callout tone-${d.tone}`}>
+  <div class="c-title"><span class="c-icon">{d.icon}</span>{title ?? d.title}</div>
+  <div class="c-body"><slot /></div>
+</aside>
+
+<style>
+  .callout {
+    --c: var(--info);
+    --cs: var(--info-soft);
+    margin: 1.4rem 0;
+    padding: 0.9rem 1.1rem;
+    border-radius: 12px;
+    background: var(--cs);
+    border: 1px solid color-mix(in srgb, var(--c) 30%, transparent);
+    border-left: 4px solid var(--c);
+  }
+  .tone-good { --c: var(--good); --cs: var(--good-soft); }
+  .tone-bad { --c: var(--bad); --cs: var(--bad-soft); }
+  .tone-warn { --c: var(--warn); --cs: var(--warn-soft); }
+  .tone-purple { --c: var(--purple); --cs: var(--purple-soft); }
+  .tone-pink { --c: var(--pink); --cs: var(--pink-soft); }
+  .c-title {
+    font-weight: 700;
+    font-size: 0.92rem;
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    color: var(--c);
+    margin-bottom: 0.3rem;
+  }
+  .c-body :global(> :first-child) { margin-top: 0; }
+  .c-body :global(> :last-child) { margin-bottom: 0; }
+</style>

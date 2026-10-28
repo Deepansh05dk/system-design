@@ -1,0 +1,253 @@
+---
+import { getLessonsByModule } from '../lib/lessons';
+import { url } from '../lib/url';
+
+interface Props {
+  current?: string;
+}
+const { current } = Astro.props;
+const groups = await getLessonsByModule();
+const extras = [
+  { href: 'practice', label: 'Design Canvas', icon: '🧩', id: 'practice' },
+  { href: 'flashcards', label: 'Trade-off Flashcards', icon: '🃏', id: 'flashcards' },
+  { href: 'final-exam', label: 'Final Exam', icon: '🏆', id: 'final-exam' },
+  { href: 'glossary', label: 'Glossary', icon: '📖', id: 'glossary' },
+];
+---
+
+<nav class="nav" aria-label="Course">
+  <div class="overall">
+    <div class="overall-row">
+      <span>Your progress</span>
+      <span id="overall-pct">0%</span>
+    </div>
+    <div class="bar"><div class="bar-fill" id="overall-bar"></div></div>
+  </div>
+
+  {
+    groups.map(({ module, lessons }) => {
+      const open = lessons.some((l) => l.id === current) || (!current && module.number === 0);
+      return (
+        <details class="group" open={open}>
+          <summary>
+            <span class="mod-icon" style={`background:${module.color}22;color:${module.color}`}>
+              {module.icon}
+            </span>
+            <span class="mod-title">
+              <span class="mod-num">Module {module.number}</span>
+              {module.short}
+            </span>
+            <span class="mod-count" data-module-count={module.id} data-total={lessons.length}>
+              0/{lessons.length}
+            </span>
+          </summary>
+          <ul>
+            {lessons.map((l, i) => (
+              <li>
+                <a
+                  href={url(`learn/${l.id}`)}
+                  class:list={['lesson-link', { active: l.id === current }]}
+                  data-lesson={l.id}
+                  data-module={module.id}
+                >
+                  <span class="check" aria-hidden="true">
+                    {i + 1}
+                  </span>
+                  <span>{l.data.title}</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </details>
+      );
+    })
+  }
+
+  <div class="extras">
+    <div class="extras-title">Practice & Reference</div>
+    {
+      extras.map((e) => (
+        <a href={url(e.href)} class:list={['lesson-link', { active: current === e.id }]}>
+          <span class="check plain">{e.icon}</span>
+          <span>{e.label}</span>
+        </a>
+      ))
+    }
+  </div>
+</nav>
+
+<script>
+  function refresh() {
+    let done: string[] = [];
+    try {
+      done = JSON.parse(localStorage.getItem('sd-progress') || '[]');
+    } catch {}
+    const set = new Set(done);
+    const links = document.querySelectorAll<HTMLAnchorElement>('.nav a[data-lesson]');
+    const perModule: Record<string, number> = {};
+    links.forEach((a) => {
+      const id = a.dataset.lesson!;
+      const isDone = set.has(id);
+      a.classList.toggle('done', isDone);
+      if (isDone) perModule[a.dataset.module!] = (perModule[a.dataset.module!] || 0) + 1;
+    });
+    document.querySelectorAll<HTMLElement>('[data-module-count]').forEach((el) => {
+      el.textContent = `${perModule[el.dataset.moduleCount!] || 0}/${el.dataset.total}`;
+    });
+    const total = links.length;
+    const count = [...links].filter((a) => set.has(a.dataset.lesson!)).length;
+    const pct = total ? Math.round((count / total) * 100) : 0;
+    const pctEl = document.getElementById('overall-pct');
+    const bar = document.getElementById('overall-bar');
+    if (pctEl) pctEl.textContent = `${pct}% · ${count}/${total}`;
+    if (bar) bar.style.width = `${pct}%`;
+  }
+  refresh();
+  window.addEventListener('sd-progress', refresh);
+  document.querySelector('.nav a.active')?.scrollIntoView({ block: 'center' });
+</script>
+
+<style>
+  .nav {
+    padding: 1rem 0.75rem 3rem;
+    font-size: 0.88rem;
+  }
+  .overall {
+    padding: 0.4rem 0.5rem 1rem;
+  }
+  .overall-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.78rem;
+    color: var(--text-faint);
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+  }
+  .bar {
+    height: 6px;
+    border-radius: 99px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    width: 0;
+    background: linear-gradient(90deg, var(--accent), #22c55e);
+    transition: width 0.4s;
+  }
+  .group {
+    margin-bottom: 0.2rem;
+  }
+  summary {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    cursor: pointer;
+    padding: 0.45rem 0.5rem;
+    border-radius: 9px;
+    list-style: none;
+    font-weight: 650;
+    color: var(--text);
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  summary:hover {
+    background: var(--surface-2);
+  }
+  .mod-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    display: grid;
+    place-items: center;
+    font-size: 0.95rem;
+    flex-shrink: 0;
+  }
+  .mod-title {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.25;
+    flex: 1;
+  }
+  .mod-num {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+    font-weight: 700;
+  }
+  .mod-count {
+    font-size: 0.72rem;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+  }
+  ul {
+    list-style: none;
+    margin: 0.15rem 0 0.6rem;
+    padding: 0 0 0 0.9rem;
+    border-left: 1px solid var(--border);
+    margin-left: 1.35rem;
+  }
+  .lesson-link {
+    display: flex;
+    gap: 0.55rem;
+    align-items: flex-start;
+    padding: 0.32rem 0.5rem;
+    border-radius: 8px;
+    color: var(--text-soft);
+    text-decoration: none;
+    line-height: 1.4;
+  }
+  .lesson-link:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .lesson-link.active {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    font-weight: 600;
+  }
+  .check {
+    flex-shrink: 0;
+    width: 19px;
+    height: 19px;
+    border-radius: 50%;
+    border: 1.5px solid var(--border-strong);
+    font-size: 0.65rem;
+    display: grid;
+    place-items: center;
+    margin-top: 1px;
+    color: var(--text-faint);
+    font-weight: 700;
+  }
+  .check.plain {
+    border: none;
+    font-size: 0.9rem;
+  }
+  .lesson-link.done .check {
+    background: var(--good);
+    border-color: var(--good);
+    color: transparent;
+    position: relative;
+  }
+  .lesson-link.done .check::after {
+    content: '✓';
+    color: #fff;
+    position: absolute;
+    font-size: 0.72rem;
+  }
+  .extras {
+    margin-top: 1rem;
+    padding-top: 0.8rem;
+    border-top: 1px solid var(--border);
+  }
+  .extras-title {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-faint);
+    font-weight: 700;
+    padding: 0 0.5rem 0.4rem;
+  }
+</style>

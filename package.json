@@ -1,0 +1,27 @@
+{
+  "name": "system-design-course",
+  "type": "module",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check",
+    "gen": "node scripts/gen-wrappers.mjs",
+    "prebuild": "node scripts/gen-wrappers.mjs",
+    "predev": "node scripts/gen-wrappers.mjs"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "^4.3.14",
+    "@astrojs/react": "^4.4.2",
+    "astro": "^5.18.2",
+    "react": "^19.1.10",
+    "react-dom": "^19.1.10"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^5.9.3"
+  }
+}

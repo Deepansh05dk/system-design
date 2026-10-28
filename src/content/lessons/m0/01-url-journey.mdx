@@ -1,0 +1,124 @@
+---
+title: What Happens When You Type a URL?
+slug: what-happens-when-you-type-a-url
+description: Follow one request from your keyboard to a server and back. This one journey introduces almost every idea in this course.
+module: m0
+order: 1
+minutes: 15
+---
+
+<Callout type="problem">
+You type `www.amazon.com` and press Enter. About half a second later, a full page appears. In that half second your request travelled across cities, maybe across oceans, touched dozens of machines, and came back. **What actually happened?**
+</Callout>
+
+This is the most famous "warm-up" question in interviews. It's also the best way to start this course, because every step of the journey is a topic we'll study later. Think of this lesson as the **map of the whole course**.
+
+## The cast of characters
+
+Before the journey, let's meet the main players. Don't worry if some of these are new. We'll cover each one in detail later.
+
+| Player | What it is | Analogy |
+|---|---|---|
+| <Term k="client">Client</Term> | Your browser (or mobile app). It **asks** for things. | A customer in a restaurant |
+| <Term k="server">Server</Term> | A computer that **answers** requests. It's just a normal computer running a program that waits for messages. | The kitchen |
+| <Term k="dns">DNS</Term> | Turns a name (`amazon.com`) into a numeric address (an <Term k="ip">IP address</Term>). | The phone book |
+| <Term k="load-balancer">Load balancer</Term> | Spreads requests across many servers. | The host who seats you at a free table |
+| <Term k="cdn">CDN</Term> | Servers all over the world that keep copies of images, JS and CSS close to you. | A local convenience store vs the central warehouse |
+| <Term k="database">Database</Term> | Where the real data (products, users, orders) lives on disk. | The pantry / storeroom |
+| <Term k="cache">Cache</Term> | A fast, temporary copy of frequently used data. | Ingredients kept on the counter instead of in the basement |
+
+<Callout type="frontend">
+You already use most of these every day without thinking about them. `fetch('/api/products')` is the client making a request. The Network tab in DevTools shows the DNS lookup, connection time, TTFB (time to first byte) and download time for every request. In this course you'll learn what happens **on the other side** of that request.
+</Callout>
+
+## The journey, step by step
+
+Click **Next** to follow the request. Watch the moving dots: they are data travelling between machines.
+
+<ArchFlow
+  title="Typing www.amazon.com, from keyboard to pixels"
+  height={430}
+  nodes={[
+    { id: 'browser', label: 'Browser', sub: 'your laptop', kind: 'client', x: 90, y: 215 },
+    { id: 'dns', label: 'DNS Resolver', sub: 'name → IP', kind: 'dns', x: 300, y: 60 },
+    { id: 'cdn', label: 'CDN Edge', sub: 'nearby city', kind: 'cdn', x: 300, y: 370 },
+    { id: 'lb', label: 'Load Balancer', sub: 'entry point', kind: 'lb', x: 360, y: 215 },
+    { id: 's1', label: 'Web Server 1', kind: 'server', x: 580, y: 140 },
+    { id: 's2', label: 'Web Server 2', kind: 'server', x: 580, y: 290 },
+    { id: 'cache', label: 'Cache', sub: 'Redis (memory)', kind: 'cache', x: 800, y: 110 },
+    { id: 'db', label: 'Database', sub: 'disk', kind: 'db', x: 800, y: 300 },
+  ]}
+  edges={[
+    { from: 'browser', to: 'dns', label: 'where is amazon.com?' },
+    { from: 'browser', to: 'lb', label: 'HTTPS request' },
+    { from: 'lb', to: 's1' },
+    { from: 'lb', to: 's2' },
+    { from: 's1', to: 'cache' },
+    { from: 's1', to: 'db' },
+    { from: 's2', to: 'cache' },
+    { from: 's2', to: 'db' },
+    { from: 'browser', to: 'cdn', label: 'images, JS, CSS' },
+  ]}
+  steps={[
+    { title: 'You press Enter', text: 'The browser only knows a <b>name</b>: <code>www.amazon.com</code>. Computers on the internet find each other by <b>numbers</b> (IP addresses), not names. So first it must find the number.', add: ['browser'], highlight: ['browser'] },
+    { title: 'DNS lookup: name → IP address', text: 'The browser asks a <b>DNS resolver</b>: “What is the IP of www.amazon.com?” It answers with something like <code>54.239.28.85</code>. The answer is cached (in the browser, the OS, your router) so next time this step is almost instant.', add: ['dns'], flow: ['browser>dns', 'dns>browser'] },
+    { title: 'Open a connection (TCP + TLS)', text: 'Now the browser knows <i>where</i> to go. It opens a <b>TCP connection</b> (a reliable channel) and does a <b>TLS handshake</b> (agreeing on encryption keys, the “S” in HTTPS). These are a few quick back-and-forth messages before any real data is sent.', add: ['lb'], flow: ['browser>lb', 'lb>browser'] },
+    { title: 'The load balancer picks a server', text: 'Amazon doesn’t have one server; it has thousands. The IP you got actually points to a <b>load balancer</b>. It forwards your request to one healthy server, here Web Server 1.', add: ['s1', 's2'], flow: ['browser>lb', 'lb>s1'], highlight: ['lb'] },
+    { title: 'The server needs data: check the cache first', text: 'To build the page, the server needs data (your name, product list...). Reading from a database disk is relatively slow, so it first checks a <b>cache</b> in memory. If the data is there (a <b>cache hit</b>), it takes under a millisecond.', add: ['cache'], flow: ['s1>cache', 'cache>s1'], highlight: ['cache'] },
+    { title: 'Cache miss? Ask the database', text: 'If the data isn’t in the cache (a <b>cache miss</b>), the server queries the <b>database</b>, which stores everything safely on disk. The server then usually saves the result in the cache for next time.', add: ['db'], flow: ['s1>db', 'db>s1'], highlight: ['db'] },
+    { title: 'Response travels back', text: 'The server builds an <b>HTTP response</b> (status <code>200 OK</code> plus HTML or JSON) and sends it back through the load balancer to your browser.', flow: ['s1>lb', 'lb>browser'] },
+    { title: 'Static files come from a CDN', text: 'The HTML references images, CSS and JS files. These don’t change per user, so they are served from a <b>CDN edge server</b> in a city near you instead of from Amazon’s main data center. Closer means faster.', add: ['cdn'], flow: ['browser>cdn', 'cdn>browser'], highlight: ['cdn'] },
+    { title: 'The browser renders the page', text: 'You know this part best: parse HTML, build the DOM and CSSOM, run JS, layout, paint. Every step before this one is what <b>system design</b> is about: making it fast, reliable and able to handle millions of users at once.', highlight: ['browser'] },
+  ]}
+/>
+
+## Zooming in: the timeline of one request
+
+Each step costs time. Here is a rough timeline for a first visit (numbers vary a lot):
+
+| Step | Typical time | Covered in |
+|---|---|---|
+| DNS lookup | 0–100 ms (0 if cached) | IP, Ports & DNS |
+| TCP handshake | 1 round trip (~10–100 ms) | TCP vs UDP |
+| TLS handshake | 1–2 round trips | HTTP & HTTPS |
+| Server processing | 5–200 ms | Caching, Databases |
+| Download response | depends on size & bandwidth | Latency & Bandwidth |
+| Static assets | fast if served by a CDN | CDN |
+
+<Callout type="analogy">
+Ordering food delivery: you look up the restaurant's address (DNS), call them and confirm who you are (TCP + TLS handshakes), a host sends your order to a free cook (load balancer), the cook grabs ready ingredients from the counter (cache) or from the storeroom (database), and the food is delivered back to you (response). Drinks come from the shop next door because it's faster (CDN).
+</Callout>
+
+## Why does this matter for system design?
+
+Everything you just saw works fine for **one** user. System design asks: **what happens with 10 million users?**
+
+- What if the DNS server goes down? → **redundancy**
+- What if one server can't handle the traffic? → **horizontal scaling + load balancing**
+- What if the database is too slow? → **caching, indexes, replication**
+- What if the data is too big for one database? → **sharding**
+- What if users are on the other side of the planet? → **CDNs and multiple regions**
+- What if a server crashes in the middle of a request? → **fault tolerance, retries**
+
+Each question is a lesson in this course. By the end you'll be able to draw this diagram for any product and **defend every box in it**.
+
+<Callout type="interview">
+“What happens when you type a URL?” is sometimes asked as-is, especially for frontend roles. A strong answer goes in order: **DNS → TCP → TLS → HTTP request → load balancer → server → cache/DB → response → rendering**, and mentions caching at each level (browser cache, DNS cache, CDN, server cache). Mention the parts you know well (rendering!) in more depth. That's where you can shine as a frontend dev.
+</Callout>
+
+<Takeaways>
+- A request is a journey: **name lookup → connect → send → process → respond → render**.
+- Big systems are made of a few repeating building blocks: **clients, DNS, load balancers, servers, caches, databases, CDNs**.
+- System design is about making this journey **fast, reliable and scalable** for millions of users.
+</Takeaways>
+
+<Quiz
+  id="url-journey"
+  questions={[
+    { q: 'Why does the browser need DNS before it can talk to amazon.com?', options: ['To encrypt the request', 'Because machines find each other by IP address, not by name', 'To pick the fastest server', 'To download images'], answer: 1, explain: 'DNS turns a human-friendly name into an IP address. Encryption is done by TLS, and picking a server is done by the load balancer.' },
+    { q: 'What is the main job of a load balancer?', options: ['Store data permanently', 'Translate names to IPs', 'Spread requests across many servers and skip unhealthy ones', 'Render HTML'], answer: 2, explain: 'A load balancer sits in front of many servers and distributes requests between them, so no single server is overloaded.' },
+    { q: 'A server checks the cache and the data is not there. What is this called?', options: ['Cache hit', 'Cache miss', 'Cache eviction', 'Cache warming'], answer: 1, explain: 'A miss means the data wasn’t in the cache, so the server must go to the slower source (the database).' },
+    { q: 'Why are images and JS files usually served from a CDN?', options: ['CDNs are more secure', 'They are the same for every user, so copies can live on servers close to the user', 'Databases cannot store images', 'Browsers require it'], answer: 1, explain: 'Static files don’t change per user, so they can be copied to edge servers around the world. Shorter distance means lower latency.' },
+    { q: 'Which step happens FIRST when you visit a site for the first time?', options: ['TLS handshake', 'DNS lookup', 'HTTP request', 'Cache lookup on the server'], answer: 1, explain: 'You can’t connect to anything until you know its IP. So: DNS → TCP → TLS → HTTP.' },
+  ]}
+/>

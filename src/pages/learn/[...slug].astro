@@ -1,0 +1,208 @@
+---
+import { render } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+import MarkComplete from '../../components/islands/MarkComplete';
+import { mdxComponents } from '../../components/mdx';
+import { getOrderedLessons, type Lesson } from '../../lib/lessons';
+import { moduleById } from '../../data/modules';
+import { url } from '../../lib/url';
+
+export async function getStaticPaths() {
+  const lessons = await getOrderedLessons();
+  return lessons.map((lesson, i) => ({
+    params: { slug: lesson.id },
+    props: { lesson, prev: lessons[i - 1] ?? null, next: lessons[i + 1] ?? null },
+  }));
+}
+
+interface Props {
+  lesson: Lesson;
+  prev: Lesson | null;
+  next: Lesson | null;
+}
+
+const { lesson, prev, next } = Astro.props;
+const { Content, headings } = await render(lesson);
+const mod = moduleById[lesson.data.module];
+const toc = headings.filter((h) => h.depth === 2);
+const nextHref = next ? url(`learn/${next.id}`) : undefined;
+---
+
+<Base title={lesson.data.title} description={lesson.data.description} current={lesson.id}>
+  <div class="lesson-wrap">
+    <article class="lesson">
+      <div class="crumbs">
+        <span class="mod-badge" style={`background:${mod.color}1f;color:${mod.color}`}>
+          {mod.icon} Module {mod.number} · {mod.short}
+        </span>
+        <span class="meta">⏱ {lesson.data.minutes} min</span>
+        {
+          lesson.data.difficulty && (
+            <span class:list={['pill', { 'pill-good': lesson.data.difficulty === 'Easy', 'pill-warn': lesson.data.difficulty === 'Medium', 'pill-bad': lesson.data.difficulty === 'Hard' }]}>
+              {lesson.data.difficulty}
+            </span>
+          )
+        }
+      </div>
+      <h1>{lesson.data.title}</h1>
+      <p class="lede">{lesson.data.description}</p>
+
+      <div class="prose">
+        <Content components={mdxComponents} />
+      </div>
+
+      <MarkComplete client:load id={lesson.id} nextHref={nextHref} />
+
+      <nav class="pager">
+        {
+          prev ? (
+            <a href={url(`learn/${prev.id}`)} class="pager-link">
+              <span class="pager-dir">← Previous</span>
+              <span class="pager-title">{prev.data.title}</span>
+            </a>
+          ) : (
+            <span />
+          )
+        }
+        {
+          next ? (
+            <a href={url(`learn/${next.id}`)} class="pager-link right">
+              <span class="pager-dir">Next →</span>
+              <span class="pager-title">{next.data.title}</span>
+            </a>
+          ) : (
+            <a href={url('practice')} class="pager-link right">
+              <span class="pager-dir">Next →</span>
+              <span class="pager-title">Practice: Design Canvas</span>
+            </a>
+          )
+        }
+      </nav>
+    </article>
+
+    {
+      toc.length > 2 && (
+        <aside class="toc">
+          <div class="toc-title">On this page</div>
+          {toc.map((h) => (
+            <a href={`#${h.slug}`}>{h.text}</a>
+          ))}
+        </aside>
+      )
+    }
+  </div>
+</Base>
+
+<style>
+  .lesson-wrap {
+    display: flex;
+    gap: 2.5rem;
+    justify-content: center;
+  }
+  .lesson {
+    width: 100%;
+    max-width: 840px;
+    min-width: 0;
+  }
+  .crumbs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    align-items: center;
+    font-size: 0.82rem;
+  }
+  .mod-badge {
+    font-weight: 700;
+    padding: 0.2rem 0.65rem;
+    border-radius: 999px;
+  }
+  .meta {
+    color: var(--text-faint);
+  }
+  h1 {
+    font-size: clamp(1.8rem, 4vw, 2.5rem);
+    line-height: 1.15;
+    letter-spacing: -0.025em;
+    margin: 0.7rem 0 0.5rem;
+  }
+  .lede {
+    font-size: 1.12rem;
+    color: var(--text-soft);
+    margin: 0 0 1.5rem;
+    padding-bottom: 1.4rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .pager {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.8rem;
+    margin-top: 1.5rem;
+  }
+  .pager-link {
+    display: flex;
+    flex-direction: column;
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    text-decoration: none;
+    background: var(--surface);
+    transition: border-color 0.15s;
+  }
+  .pager-link:hover {
+    border-color: var(--accent);
+  }
+  .pager-link.right {
+    text-align: right;
+  }
+  .pager-dir {
+    font-size: 0.78rem;
+    color: var(--text-faint);
+    font-weight: 600;
+  }
+  .pager-title {
+    color: var(--text);
+    font-weight: 650;
+  }
+  .toc {
+    width: 220px;
+    flex-shrink: 0;
+    position: sticky;
+    top: 84px;
+    align-self: flex-start;
+    max-height: calc(100vh - 110px);
+    overflow-y: auto;
+    font-size: 0.83rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+  .toc-title {
+    font-size: 0.7rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-faint);
+    margin-bottom: 0.4rem;
+  }
+  .toc a {
+    color: var(--text-soft);
+    text-decoration: none;
+    padding: 0.25rem 0.6rem;
+    border-left: 2px solid var(--border);
+    line-height: 1.4;
+  }
+  .toc a:hover {
+    color: var(--accent-text);
+    border-left-color: var(--accent);
+  }
+  @media (max-width: 1280px) {
+    .toc {
+      display: none;
+    }
+  }
+  @media (max-width: 560px) {
+    .pager {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
