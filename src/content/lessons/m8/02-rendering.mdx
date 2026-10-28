@@ -1,0 +1,76 @@
+---
+title: Rendering Strategies (CSR, SSR, SSG, ISR, Streaming, Islands)
+slug: rendering-strategies
+description: Where and when HTML is generated, and how that choice affects performance, SEO, server cost and complexity.
+module: m8
+order: 2
+minutes: 14
+---
+
+<Callout type="problem">
+An e-commerce site has a marketing homepage, 2 million product pages, a search page, a cart and an admin dashboard. Should every page be rendered in the browser? On the server for every request? Built ahead of time? **Each page has a different best answer**, and choosing well affects SEO, Core Web Vitals, server costs and conversion rates.
+</Callout>
+
+## Compare them
+
+<RenderingTimeline />
+
+## The options
+
+| Strategy | HTML generated… | Best for | Watch out |
+|---|---|---|---|
+| <Term k="csr">**CSR**</Term> | In the browser by JS | Logged-in apps, dashboards, highly interactive tools | Slow first paint on slow devices; SEO; big bundles |
+| <Term k="ssr">**SSR**</Term> | On the server per request | Personalized or frequently changing pages that need SEO/fast paint (search results, product pages with live stock) | Server cost & latency (TTFB); hydration cost |
+| <Term k="ssg">**SSG**</Term> | At build time, served by CDN | Content that's the same for everyone: docs, blogs, marketing | Build time grows with page count; stale until rebuild |
+| **ISR** (incremental static regeneration) | Static, but regenerated in the background after N seconds or on demand | Huge catalogs of mostly static pages (2M products) | Briefly stale pages; invalidation logic |
+| **Streaming SSR** | Server streams HTML in chunks (React Suspense) | Pages with some slow data sections | Complexity; caching streamed responses |
+| **Islands / partial hydration** | Static HTML + JS only for interactive parts (Astro) | Content-heavy sites with some interactivity | Shared state between islands is harder |
+| **React Server Components** | Components run on the server; only client components ship JS | Large apps wanting less client JS (Next.js App Router) | New mental model; framework-specific |
+
+## Key metrics they affect
+
+- **TTFB** (time to first byte): CDN-served static HTML wins; SSR depends on server work.
+- **FCP / LCP** (first and largest contentful paint): SSR/SSG show content early; CSR waits for JS + data.
+- **INP** (interaction to next paint, responsiveness): heavy hydration and big JS bundles hurt it.
+- **CLS** (layout shift): reserve space for images/ads/late content in any strategy.
+
+## Hydration: the hidden cost
+
+SSR/SSG send HTML that **looks** ready, but buttons don't work until JavaScript downloads and **hydrates** (attaches event handlers, rebuilds component state). On a slow phone, there can be seconds of "looks clickable, isn't". Islands, partial/selective hydration, resumability (Qwik) and Server Components all attack this cost.
+
+## Mixing strategies per route
+
+Real apps mix them. For the e-commerce site:
+
+| Page | Strategy | Why |
+|---|---|---|
+| Marketing homepage | SSG (+ CDN) | Same for everyone, must be fastest |
+| Product pages (2M) | ISR / SSR + CDN caching (short TTL) | SEO critical; mostly static, price/stock change |
+| Search results | SSR (streaming) | SEO for category pages; personalized ranking |
+| Cart, checkout | CSR (or SSR shell + client) | Personal, interactive, no SEO |
+| Admin dashboard | CSR (SPA) | Behind login, highly interactive |
+
+<Callout type="why" title="Why not SSR everything to be safe?">
+SSR costs **server compute on every request** and adds TTFB if data is slow; caching personalized HTML is hard. For pages that are the same for everyone, pre-built HTML on a CDN is faster **and** cheaper. For logged-in, app-like screens, SEO doesn't matter, so CSR is simpler. Choose per route.
+</Callout>
+
+<Callout type="interview">
+Always state the rendering strategy for each major page and justify it with **SEO needs, personalization, data freshness and interactivity**. Mention **CDN caching** for SSG/ISR pages, **hydration cost**, and Core Web Vitals (**LCP, INP, CLS**). This shows you see the frontend as part of the overall system.
+</Callout>
+
+<Takeaways>
+- **CSR:** app-like, slow first paint, weak SEO. **SSR:** fast content + SEO, server cost. **SSG/ISR:** fastest via CDN for shared content.
+- **Streaming, islands and Server Components** reduce time-to-content and JS shipped.
+- **Hydration** is the cost of making server HTML interactive.
+- **Mix strategies per route** based on SEO, personalization, freshness and interactivity.
+</Takeaways>
+
+<Quiz
+  id="rendering"
+  questions={[
+    { q: 'A documentation site with 5,000 pages, identical for all users. Best default?', options: ['CSR', 'SSR per request', 'SSG served from a CDN', 'WebSockets'], answer: 2, explain: 'Pre-built static HTML on a CDN is the fastest and cheapest.' },
+    { q: '2 million product pages that change occasionally and need SEO. A good fit?', options: ['SSG rebuilding everything on each change', 'ISR or SSR with short CDN caching', 'Pure CSR', 'No rendering'], answer: 1, explain: 'Regenerate pages on demand or cache SSR output briefly at the CDN.' },
+    { q: 'What is hydration?', options: ['Compressing HTML', 'Attaching JS behavior/state to server-rendered HTML so it becomes interactive', 'Loading CSS', 'A caching strategy'], answer: 1, explain: 'Until hydration completes, SSR’d buttons may not respond.' },
+    { q: 'Why is an admin dashboard often fine as a CSR SPA?', options: ['It needs SEO', 'It’s behind login, highly interactive, and SEO doesn’t matter', 'CSR is always fastest', 'SSR is not allowed for admins'], answer: 1, explain: 'No SEO requirement and lots of interactivity favor a client app.' },
+  ]}
+/>

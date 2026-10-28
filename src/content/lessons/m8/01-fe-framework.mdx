@@ -1,0 +1,100 @@
+---
+title: The Frontend System Design Interview (RADIO)
+slug: frontend-system-design-framework
+description: "How frontend system design rounds differ from backend ones, and a framework to structure your answer: Requirements, Architecture, Data model, Interface, Optimizations."
+module: m8
+order: 1
+minutes: 12
+---
+
+<Callout type="problem">
+"Design the Facebook news feed" means something very different in a **frontend** round. Nobody wants your Cassandra schema. They want to know how you'd structure components, manage state, talk to the API, paginate, cache, handle errors and make it fast and accessible on a cheap Android phone. Same question, different lens.
+</Callout>
+
+## What's different in a frontend round
+
+| Backend round | Frontend round |
+|---|---|
+| Databases, sharding, queues | Component architecture, state management |
+| Service-to-service APIs | Client ↔ server API design (what the UI needs) |
+| Throughput, replication | Rendering performance, bundle size, network usage |
+| Server failures | Offline, flaky networks, error and loading states |
+| Data consistency across nodes | Consistency between client cache and server (optimistic updates) |
+| — | Accessibility, i18n, UX details |
+
+Typical prompts: news feed, autocomplete/typeahead, chat UI, image carousel/gallery, Google Docs-style editor, e-commerce product page, video player, Google Sheets, Figma-like canvas, poll widget, infinite scroll, a design system / component library.
+
+## The RADIO framework
+
+A popular structure (from GreatFrontEnd) that maps nicely to the backend framework you learned in Module 6:
+
+<ArchFlow
+  title="RADIO: structure for a frontend design answer"
+  height={250}
+  nodes={[
+    { id: 'r', label: 'Requirements', sub: 'scope, devices, users', kind: 'client', icon: '📋', x: 90, y: 125 },
+    { id: 'a', label: 'Architecture', sub: 'components & layers', kind: 'service', icon: '🏗️', x: 270, y: 125 },
+    { id: 'd', label: 'Data model', sub: 'state shape, cache', kind: 'db', icon: '🗂️', x: 450, y: 125 },
+    { id: 'i', label: 'Interface', sub: 'APIs & component props', kind: 'lb', icon: '🔌', x: 630, y: 125 },
+    { id: 'o', label: 'Optimizations', sub: 'perf, a11y, offline…', kind: 'cache', icon: '🚀', x: 810, y: 125 },
+  ]}
+  edges={[
+    { from: 'r', to: 'a' },
+    { from: 'a', to: 'd' },
+    { from: 'd', to: 'i' },
+    { from: 'i', to: 'o' },
+  ]}
+/>
+
+### R: Requirements (~5 min)
+- **Functional:** core features (e.g. feed: view posts, like, comment, infinite scroll, create post).
+- **Non-functional:** devices (mobile web? desktop?), network conditions, performance targets (Core Web Vitals), accessibility, i18n, offline support, SEO needs.
+- Scope: which parts are you designing? Just the feed list? The composer too?
+
+### A: Architecture (~10 min)
+Draw the **client-side architecture**: views/components, a **client store** (server-state cache vs UI state), a **data/API layer**, and the server/BFF. Explain the responsibility of each and how data flows.
+
+```text
+Server (API / BFF) ⇄ API client layer (fetch, retries, normalization)
+                    ⇄ Client store (server-state cache: React Query / Apollo / Redux)
+                    ⇄ Components (Feed → FeedItem → MediaGallery, ActionBar, Comments)
+```
+
+Also choose a **rendering strategy** (CSR / SSR / SSG / streaming / islands); next lesson.
+
+### D: Data model (~5 min)
+- **Server data** the client caches (posts, users, comments). Normalize by ID? (`posts: {id: post}`, `users: {id: user}`) so a user's name updates everywhere.
+- **Client-only state:** UI state (open menus, drafts), form state, URL state (filters in the query string).
+- Where each piece lives and who owns it.
+
+### I: Interface (~10 min)
+- **Client ↔ server API:** endpoints and payload shapes the UI needs (`GET /feed?cursor=…` returning posts + embedded authors + nextCursor), REST vs GraphQL, real-time channel (SSE/WebSocket) for new items.
+- **Component APIs:** props of key components (`<Autocomplete onSelect fetchSuggestions debounceMs renderItem />`).
+
+### O: Optimizations & deep dives (~15 min)
+Pick what matters for this product: performance (virtualization, code splitting, image loading, caching), network (pagination, prefetch, batching), **optimistic updates**, error/loading/empty states, **offline**, **accessibility** (keyboard, screen readers, focus management), **i18n** (RTL, pluralization), security (XSS, CSP), and observability (RUM, error tracking).
+
+<Callout type="frontend">
+This is your home turf. The backend knowledge from this course is your **advantage**: you can explain *why* the API should use cursor pagination, *why* a CDN serves your images, and *what* the server does when you send an idempotency key. Frontend candidates who can talk across the stack stand out.
+</Callout>
+
+<Callout type="interview">
+Make your client architecture diagram as explicit as a backend one. Say **where state lives** and **why** (server cache vs UI state vs URL), and always cover **loading, error, empty and offline states**. Interviewers notice when candidates only design the happy path.
+</Callout>
+
+<Takeaways>
+- Frontend rounds focus on **components, state, client–server API, performance, UX and accessibility**.
+- **RADIO:** Requirements → Architecture → Data model → Interface → Optimizations.
+- Separate **server state (cached)** from **UI state** and **URL state**; normalize shared entities.
+- Always handle **loading / error / empty / offline**, and mention **accessibility**.
+</Takeaways>
+
+<Quiz
+  id="fe-framework"
+  questions={[
+    { q: 'What does the “I” in RADIO cover?', options: ['Infrastructure', 'Interface: client–server API and component APIs', 'Indexing', 'Integration tests'], answer: 1, explain: 'Interface = the contracts: what the UI requests and how components are used.' },
+    { q: 'Why normalize server data in a client cache (e.g. users by ID)?', options: ['To reduce CSS', 'So an entity updated in one place (a user’s name) updates everywhere it appears', 'Browsers require it', 'To avoid HTTPS'], answer: 1, explain: 'One source of truth per entity on the client, like database normalization.' },
+    { q: 'Which is NOT typically a focus of a frontend system design round?', options: ['Component architecture', 'Rendering performance', 'Database sharding strategy', 'Accessibility'], answer: 2, explain: 'Database internals belong to backend rounds.' },
+    { q: 'Where should a search filter like ?category=shoes usually live?', options: ['Only in component state', 'In the URL (so it’s shareable and survives refresh)', 'In localStorage', 'In a cookie'], answer: 1, explain: 'URL state makes views linkable, bookmarkable and back-button friendly.' },
+  ]}
+/>

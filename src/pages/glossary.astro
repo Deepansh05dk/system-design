@@ -1,0 +1,140 @@
+---
+import Base from '../layouts/Base.astro';
+import { glossary } from '../data/glossary';
+import { getOrderedLessons } from '../lib/lessons';
+import { url } from '../lib/url';
+
+const lessons = await getOrderedLessons();
+const titles = Object.fromEntries(lessons.map((l) => [l.id, l.data.title]));
+const entries = Object.entries(glossary).sort((a, b) => a[1].term.localeCompare(b[1].term));
+const letters = [...new Set(entries.map(([, e]) => e.term[0].toUpperCase()))];
+---
+
+<Base title="Glossary" description="Every term used in the course, explained in one or two sentences." current="glossary">
+  <div class="page">
+    <div class="kicker">📖 Reference</div>
+    <h1>Glossary</h1>
+    <p class="lede">{entries.length} terms explained simply. Each links to the lesson where it’s taught.</p>
+    <input id="g-search" type="search" placeholder="Filter terms… (e.g. cache, shard, TLS)" aria-label="Filter glossary" />
+    <div class="letters">
+      {letters.map((l) => <a href={`#letter-${l}`}>{l}</a>)}
+    </div>
+    <div class="list">
+      {
+        letters.map((l) => (
+          <section id={`letter-${l}`} class="letter-group">
+            <h2>{l}</h2>
+            {entries
+              .filter(([, e]) => e.term[0].toUpperCase() === l)
+              .map(([k, e]) => (
+                <div class="entry" id={k} data-text={`${e.term} ${e.short}`.toLowerCase()}>
+                  <div class="term">{e.term}</div>
+                  <div class="def">{e.short}</div>
+                  {e.lesson && titles[e.lesson] && (
+                    <a class="lesson" href={url(`learn/${e.lesson}`)}>
+                      → {titles[e.lesson]}
+                    </a>
+                  )}
+                </div>
+              ))}
+          </section>
+        ))
+      }
+    </div>
+  </div>
+</Base>
+
+<script>
+  const input = document.getElementById('g-search') as HTMLInputElement | null;
+  input?.addEventListener('input', () => {
+    const q = input.value.trim().toLowerCase();
+    document.querySelectorAll<HTMLElement>('.entry').forEach((el) => {
+      el.style.display = !q || el.dataset.text!.includes(q) ? '' : 'none';
+    });
+    document.querySelectorAll<HTMLElement>('.letter-group').forEach((g) => {
+      const any = [...g.querySelectorAll<HTMLElement>('.entry')].some((e) => e.style.display !== 'none');
+      g.style.display = any ? '' : 'none';
+    });
+  });
+  const hash = location.hash.slice(1);
+  if (hash) document.getElementById(hash)?.classList.add('flash');
+</script>
+
+<style>
+  .page {
+    max-width: 840px;
+    margin: 0 auto;
+  }
+  .kicker {
+    font-weight: 800;
+    color: var(--accent-text);
+    font-size: 0.85rem;
+  }
+  h1 {
+    font-size: clamp(1.8rem, 4vw, 2.4rem);
+    margin: 0.3rem 0;
+    letter-spacing: -0.02em;
+  }
+  .lede {
+    color: var(--text-soft);
+    font-size: 1.05rem;
+  }
+  #g-search {
+    width: 100%;
+    font: inherit;
+    padding: 0.7rem 0.9rem;
+    border-radius: 12px;
+    border: 1.5px solid var(--border-strong);
+    background: var(--surface);
+    color: var(--text);
+    margin: 0.5rem 0 0.8rem;
+  }
+  .letters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-bottom: 1rem;
+  }
+  .letters a {
+    width: 30px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    border-radius: 8px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    text-decoration: none;
+    font-weight: 700;
+    font-size: 0.85rem;
+  }
+  h2 {
+    font-size: 1.2rem;
+    color: var(--accent-text);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.3rem;
+    margin: 1.6rem 0 0.6rem;
+  }
+  .entry {
+    padding: 0.7rem 0.9rem;
+    border-radius: 12px;
+    margin-bottom: 0.4rem;
+    scroll-margin-top: 90px;
+  }
+  .entry:hover {
+    background: var(--surface-2);
+  }
+  .entry.flash {
+    background: var(--accent-soft);
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+  .term {
+    font-weight: 750;
+  }
+  .def {
+    color: var(--text-soft);
+    font-size: 0.95rem;
+  }
+  .lesson {
+    font-size: 0.82rem;
+  }
+</style>

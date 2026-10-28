@@ -1,0 +1,85 @@
+---
+title: Frontend Performance at Scale
+slug: frontend-performance
+description: Core Web Vitals, performance budgets, images, code splitting, caching layers and measuring real users. The frontend checklist for any design.
+module: m8
+order: 6
+minutes: 15
+---
+
+<Callout type="problem">
+Your product page loads in 1.2 s on your MacBook on office Wi-Fi. For a real user on a ₹8,000 Android phone over 3G it takes 9 seconds, and half of them leave. Every 100 ms matters for conversion. **Frontend performance is system design too**: it's about the whole path from CDN to pixels on a weak device.
+</Callout>
+
+## Measure what users feel: Core Web Vitals
+
+| Metric | Measures | Good | Common fixes |
+|---|---|---|---|
+| **LCP**: Largest Contentful Paint | When the main content appears | ≤ 2.5 s | SSR/SSG, CDN, preload hero image, fewer render-blocking resources |
+| **INP**: Interaction to Next Paint | How fast the page responds to taps/clicks | ≤ 200 ms | Less JS, break up long tasks, avoid heavy hydration, web workers |
+| **CLS**: Cumulative Layout Shift | How much content jumps around | ≤ 0.1 | Reserve space for images/ads/embeds, avoid inserting content above |
+
+Measure **lab data** (Lighthouse, WebPageTest on throttled profiles) **and field data** (RUM: real users via `web-vitals`, CrUX). Lab tells you why; field tells you what users actually experience. Track **p75** (Google's threshold) and segment by device and country.
+
+## Performance budgets
+
+Agree on limits and enforce them in CI: e.g. "≤ 170 KB of compressed JS on the critical path", "LCP ≤ 2.5 s on a mid-range phone over 4G", "no image > 200 KB". A budget turns performance from a vague wish into a test that fails.
+
+## The frontend performance toolbox
+
+**Ship less JavaScript**
+- **Code splitting** by route and by interaction (`import()` the date picker when it's opened).
+- Tree-shaking, removing heavy dependencies (moment → date-fns/Intl), analyzing bundles.
+- Islands / Server Components / partial hydration to avoid shipping JS for static parts.
+
+**Load the right things first**
+- `preload` the LCP image and critical fonts; `preconnect` to API/CDN origins.
+- Inline critical CSS; defer non-critical scripts; `fetchpriority="high"` on the hero image.
+- Prefetch the next likely route on hover/visibility.
+
+**Images and media (usually the biggest bytes)**
+- Modern formats (AVIF/WebP), responsive `srcset`/`sizes`, lazy-load below the fold, explicit width/height or aspect-ratio (CLS!), image CDN for on-the-fly resizing.
+
+**Caching layers (recall Module 2)**
+- **CDN** for static assets with **fingerprinted filenames** + `Cache-Control: immutable`.
+- **HTTP caching** for API responses where possible (ETag, `stale-while-revalidate`).
+- **Service Worker** for offline and instant repeat visits.
+- **Client data cache** (React Query/Apollo) to avoid refetching.
+
+**Keep the main thread free**
+- Break long tasks (> 50 ms) with `scheduler.yield()`/`setTimeout` chunks; move heavy work to **Web Workers**.
+- Virtualize long lists; memoize expensive components; avoid layout thrashing (batch DOM reads/writes).
+
+**Network**
+- HTTP/2 or HTTP/3, compression (Brotli), fewer round trips (bundle critical requests, BFF aggregation), cursor pagination, avoid request waterfalls (fetch in parallel, or on the server).
+
+<Callout type="analogy">
+Performance budgets are like a monthly household budget: you can spend on anything, but the total must fit. Adding a 90 KB charting library means something else must go, or it must be loaded only on the page that needs it.
+</Callout>
+
+## Observability for the frontend
+
+- **RUM:** Core Web Vitals per route, device, country.
+- **Error tracking:** JS errors with source maps (Sentry), failed API calls.
+- **Tracing:** pass a trace ID from the browser into backend requests so a slow interaction can be followed through the whole system (Module 5).
+
+<Callout type="interview">
+In any frontend design, spend a few minutes on performance: name the **Core Web Vitals** targets, the **rendering strategy**, **CDN + caching headers**, **code splitting**, **image strategy**, **virtualization**, and **RUM to verify in production**. Mentioning a **performance budget enforced in CI** is a strong senior signal.
+</Callout>
+
+<Takeaways>
+- Optimize for **LCP, INP, CLS** at **p75 on real (slow) devices**; measure lab + field.
+- **Ship less JS** (splitting, islands), **load critical things first**, **optimize images**, **cache at every layer**.
+- Keep the **main thread** free: break long tasks, workers, virtualization.
+- Enforce **performance budgets** in CI and watch **RUM** in production.
+</Takeaways>
+
+<Quiz
+  id="fe-perf"
+  questions={[
+    { q: 'Which Core Web Vital measures responsiveness to user interactions?', options: ['LCP', 'INP', 'CLS', 'TTFB'], answer: 1, explain: 'Interaction to Next Paint replaced FID in 2024.' },
+    { q: 'Images loading late push text down the page. Which metric suffers, and the fix?', options: ['LCP; compress images', 'CLS; reserve space with width/height or aspect-ratio', 'INP; use web workers', 'TTFB; use a CDN'], answer: 1, explain: 'Unreserved space causes layout shift.' },
+    { q: 'A heavy rich-text editor is only used on one admin page. Best approach?', options: ['Include it in the main bundle', 'Code-split it and load it only on that route / when opened', 'Inline it in HTML', 'Load it from a slower CDN'], answer: 1, explain: 'Don’t make every user pay for code only some pages need.' },
+    { q: 'Why measure field (RUM) data, not just Lighthouse?', options: ['Lighthouse is inaccurate', 'Real users have diverse devices and networks; lab tests can’t capture the real distribution', 'RUM is required by law', 'Lighthouse only measures CSS'], answer: 1, explain: 'Lab data explains, field data validates real experience.' },
+  ]}
+/>

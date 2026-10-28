@@ -1,0 +1,66 @@
+---
+import Base from '../layouts/Base.astro';
+import Quiz from '../components/islands/Quiz';
+
+const questions = [
+  { q: 'What happens FIRST when a browser opens a site it has never visited?', options: ['TLS handshake', 'DNS lookup', 'HTTP request', 'Rendering'], answer: 1, explain: 'You need the IP before you can connect. DNS → TCP → TLS → HTTP.' },
+  { q: 'An app gets 50M requests/day. Roughly what is the average QPS?', options: ['~60', '~600', '~6,000', '~60,000'], answer: 1, explain: '50M ÷ ~86,400 s ≈ 580 QPS.' },
+  { q: 'Which protocol suits a live video call best for the media stream?', options: ['TCP', 'UDP (e.g. via WebRTC)', 'SMTP', 'FTP'], answer: 1, explain: 'Late media is useless; skip lost packets instead of waiting.' },
+  { q: 'A query filters by email on a 50M-row table and takes seconds. First fix?', options: ['Add a read replica', 'Add an index on email', 'Shard the table', 'Switch to NoSQL'], answer: 1, explain: 'Without an index it’s a full table scan. An index makes it a few page reads.' },
+  { q: 'Two concurrent withdrawals both succeed and overdraw an account. What was missing?', options: ['Durability', 'Isolation (locking / atomic conditional update)', 'Replication', 'A CDN'], answer: 1, explain: 'A lost-update race. Use row locks, conditional updates or optimistic versions.' },
+  { q: 'Chat messages: billions per day, always read by conversation newest-first. Store?', options: ['Single PostgreSQL table without sharding', 'Wide-column store partitioned by conversation, clustered by message ID', 'Graph DB', 'Object storage'], answer: 1, explain: 'Huge write volume + known access pattern = wide-column.' },
+  { q: 'Users randomly get logged out after you add servers. Likely cause?', options: ['TLS certificate', 'Sessions stored in each server’s memory', 'DNS TTL', 'Slow DB'], answer: 1, explain: 'Make servers stateless: sessions in Redis or signed tokens.' },
+  { q: 'Requests take 20 ms to 10 s. Which LB algorithm?', options: ['Round robin', 'Least connections', 'IP hash', 'Random'], answer: 1, explain: 'Avoids piling new requests on servers stuck on slow work.' },
+  { q: 'Product price changed but users see the old price for an hour. What fixes it best?', options: ['Bigger cache', 'Delete/invalidate the cache key when the price is updated (and keep a TTL as a safety net)', 'Remove the database', 'Use a CDN'], answer: 1, explain: 'Invalidate on write; TTL bounds staleness if something is missed.' },
+  { q: 'You add replicas, but writes are still the bottleneck. Next step?', options: ['More replicas', 'Sharding (partition writes across databases)', 'A CDN', 'Larger TTLs'], answer: 1, explain: 'Replicas scale reads; shards scale writes.' },
+  { q: 'Going from 4 to 5 cache servers with hash % N remaps most keys. Better approach?', options: ['Random placement', 'Consistent hashing with virtual nodes', 'Range sharding by name', 'One big cache'], answer: 1, explain: 'Only ~1/N of keys move when a node is added.' },
+  { q: 'After an order, email, inventory and analytics must react. Pattern?', options: ['Call all three synchronously', 'Publish an OrderPlaced event; each service subscribes', 'Cron job hourly', 'Shared database table polling'], answer: 1, explain: 'Pub/sub decouples producers from consumers.' },
+  { q: 'During a network partition, seat inventory should prefer…', options: ['Availability (accept and reconcile later)', 'Consistency (refuse rather than risk double-booking)', 'Neither', 'Latency'], answer: 1, explain: 'Money and inventory are CP; feeds and likes can be AP.' },
+  { q: 'N=3 replicas. Which R/W guarantees reads see the latest write?', options: ['R=1, W=1', 'R=1, W=2', 'R=2, W=2', 'R=0, W=3'], answer: 2, explain: 'R + W > N → overlap.' },
+  { q: 'A payment call times out with an unknown result. Safe action?', options: ['Charge again with a new request', 'Retry with the same idempotency key or query status', 'Mark paid', 'Do nothing'], answer: 1, explain: 'Idempotency keys make retries safe.' },
+  { q: 'Thousands of clients retry at the same instant after an outage. What helps?', options: ['Fixed 1 s retries', 'Exponential backoff with jitter', 'Infinite retries', 'Retry at every layer'], answer: 1, explain: 'Jitter spreads retries, preventing a retry storm.' },
+  { q: 'A slow dependency makes callers run out of threads. Pattern to stop the cascade?', options: ['Bigger thread pool', 'Circuit breaker (+ timeouts, bulkheads)', 'More retries', 'Disable logging'], answer: 1, explain: 'Fail fast while the dependency recovers.' },
+  { q: 'Booking spans flight, hotel and payment services. How to keep it consistent?', options: ['One SQL transaction across services', 'A saga with compensating actions', 'Hope', 'Two-phase commit across external APIs'], answer: 1, explain: 'Local transactions + compensations; 2PC rarely fits microservices.' },
+  { q: 'Which ID scheme is 64-bit, time-sortable and generated without coordination?', options: ['Auto-increment', 'UUID v4', 'Snowflake', 'MD5 of the content'], answer: 2, explain: 'Timestamp + machine + sequence bits.' },
+  { q: 'Live sports scores, server → browser only. Simplest good option?', options: ['WebSocket', 'Server-Sent Events', 'Short polling every 100 ms', 'gRPC from the browser'], answer: 1, explain: 'One-way streaming over HTTP with auto-reconnect.' },
+  { q: 'Infinite feed shows duplicates when new posts arrive. Fix?', options: ['Offset pagination', 'Cursor pagination', 'Bigger pages', 'No pagination'], answer: 1, explain: 'Cursors continue after the last seen item, unaffected by inserts.' },
+  { q: '99.9% availability allows roughly how much downtime per year?', options: ['~5 minutes', '~53 minutes', '~8.8 hours', '~3.6 days'], answer: 2, explain: '0.1% of 8,760 hours.' },
+  { q: 'Celebrity with 50M followers posts. Feed design?', options: ['Push to all 50M timelines', 'Hybrid: don’t push celebrity posts; merge them at read time', 'Disable their account', 'Pull for everyone'], answer: 1, explain: 'Avoids massive write amplification while keeping reads fast for normal users.' },
+  { q: 'Where should uploaded videos go, and how are they delivered?', options: ['DB BLOB, served by app servers', 'Object storage, transcoded into segments, delivered via CDN with adaptive bitrate', 'Redis', 'Local disk of one server'], answer: 1, explain: 'The standard video pipeline.' },
+  { q: 'A docs site identical for all users. Best rendering strategy?', options: ['CSR', 'SSR per request', 'SSG served from a CDN', 'WebSocket rendering'], answer: 2, explain: 'Pre-built HTML at the edge is fastest and cheapest.' },
+  { q: 'Autocomplete shows results for “ca” while the input says “cat”. Cause and fix?', options: ['Slow CSS; inline styles', 'Out-of-order responses; abort stale requests / accept only the latest', 'Missing index; add one', 'DNS; lower TTL'], answer: 1, explain: 'A classic frontend race condition.' },
+];
+---
+
+<Base title="Final Exam" description="26 mixed questions across the whole course." current="final-exam">
+  <div class="page">
+    <div class="kicker">🏆 Final exam</div>
+    <h1>Final Exam</h1>
+    <p class="lede">
+      {questions.length} questions mixing every module: networking, databases, building blocks, distributed systems, APIs,
+      reliability, interview problems and frontend design. Aim for 80%+. Your best score is saved.
+    </p>
+    <Quiz client:visible id="final-exam" title="The whole course" questions={questions} />
+  </div>
+</Base>
+
+<style>
+  .page {
+    max-width: 840px;
+    margin: 0 auto;
+  }
+  .kicker {
+    font-weight: 800;
+    color: var(--accent-text);
+    font-size: 0.85rem;
+  }
+  h1 {
+    font-size: clamp(1.8rem, 4vw, 2.4rem);
+    margin: 0.3rem 0;
+    letter-spacing: -0.02em;
+  }
+  .lede {
+    color: var(--text-soft);
+    font-size: 1.05rem;
+  }
+</style>

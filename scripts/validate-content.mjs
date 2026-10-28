@@ -48,6 +48,11 @@ const fail = (file, msg) => {
 
 for (const file of walk('src/content/lessons')) {
   const src = readFileSync(file, 'utf8');
+  const fm = src.slice(0, src.indexOf('\n---', 4));
+  for (const line of fm.split('\n')) {
+    const m = line.match(/^(\w+): (.*)$/);
+    if (m && m[2].includes(': ') && !/^["']/.test(m[2])) fail(file, `frontmatter "${m[1]}" contains ": " and must be quoted`);
+  }
   for (const block of tags(src, 'ArchFlow')) {
     stats.flows++;
     const nodes = props(block, 'nodes') ?? [];

@@ -1,0 +1,127 @@
+---
+title: Design an Autocomplete Component
+slug: design-an-autocomplete-component
+description: A reusable, accessible typeahead component. Debouncing, race conditions, caching, keyboard navigation, ARIA combobox and a flexible API.
+module: m8
+order: 4
+minutes: 16
+difficulty: Medium
+---
+
+<Callout type="problem">
+Your design system team asks for a reusable `<Autocomplete>` used in 40 places: searching users, products, cities, tags. Some search a server, some filter a local list. It must feel instant, never show results for an older query, work entirely with the keyboard and screen readers, and be easy for other teams to customize. You saw the backend side in Module 7; this is the frontend side.
+</Callout>
+
+## R: Requirements
+
+**Functional:** as the user types, show suggestions; select with mouse or keyboard; support async (server) and sync (local) sources; custom rendering of items; empty, loading and error states; optional "recent searches".
+
+**Non-functional:** responsive (results feel instant), minimal network usage, **no stale results**, fully **accessible** (WAI-ARIA combobox pattern), works on mobile, small bundle, themable.
+
+## A: Architecture
+
+```text
+<Autocomplete>
+ ├─ <input role="combobox">            ← controlled value, ARIA attributes
+ ├─ <Listbox role="listbox">           ← portal/popover, virtualized if long
+ │    └─ <Option role="option"> × N    ← renderItem(item, { active, query })
+ └─ useAutocomplete() hook             ← state machine + data fetching
+       ├─ debounce
+       ├─ request manager (abort / ignore stale)
+       └─ cache: Map<query, results> (LRU, TTL)
+```
+
+Separating the **headless logic hook** from the **presentation** lets teams reuse behavior with their own markup (the approach of Downshift, React Aria, Headless UI).
+
+## D: State
+
+```ts
+type State = {
+  query: string;
+  status: 'idle' | 'loading' | 'success' | 'error';
+  results: Item[];
+  activeIndex: number;   // keyboard-highlighted option (-1 = none)
+  isOpen: boolean;
+};
+```
+
+## I: Component API
+
+```tsx
+<Autocomplete<Product>
+  fetchSuggestions={(query, { signal }) => api.searchProducts(query, { signal })}
+  // or: options={localArray} filter={(item, q) => ...}
+  debounceMs={150}
+  minQueryLength={2}
+  renderItem={(item, { active, query }) => <ProductRow item={item} highlight={query} />}
+  getItemLabel={(item) => item.name}
+  onSelect={(item) => router.push(`/p/${item.id}`)}
+  placeholder="Search products"
+/>
+```
+
+## O: Deep dives
+
+### 1. Don't send a request per keystroke: debounce
+
+Wait ~100–200 ms after the user stops typing. Combine with `minQueryLength` and skip identical consecutive queries.
+
+### 2. Race conditions: never show stale results
+
+<SequenceFlow
+  title="The out-of-order response bug"
+  actors={[
+    { id: 'u', label: 'Input', icon: '⌨️' },
+    { id: 'c', label: 'Component', icon: '🧩' },
+    { id: 's', label: 'Server', icon: '🖥️' },
+  ]}
+  messages={[
+    { from: 'u', to: 'c', label: 'types "ca"', note: 'Request A for “ca” is sent.' },
+    { from: 'c', to: 's', label: 'GET ?q=ca  (A)' },
+    { from: 'u', to: 'c', label: 'types "cat"', note: 'Request B for “cat” is sent.' },
+    { from: 'c', to: 's', label: 'GET ?q=cat  (B)' },
+    { from: 's', to: 'c', label: 'B: results for "cat"', dashed: true, note: 'B is fast (cached on the server). Results for “cat” are shown. 👍' },
+    { from: 's', to: 'c', label: 'A: results for "ca" (late!)', dashed: true, bad: true, note: 'A arrives LATE and, naively, overwrites the screen with results for “ca” while the input says “cat”. 🐛 Fix: abort A with <code>AbortController</code> when B starts, and/or only accept responses whose query matches the current input (or the latest request ID).' },
+  ]}
+/>
+
+### 3. Caching
+
+Keep a client cache `Map<query, results>` (LRU-bounded, short TTL). Backspacing from "cat" to "ca" shows cached results instantly. For local data sources, precompute a lowercase/normalized index.
+
+### 4. Keyboard and accessibility (WAI-ARIA combobox)
+
+- `↓ / ↑` move `activeIndex`; `Enter` selects; `Esc` closes; `Tab` moves on.
+- Input: `role="combobox"`, `aria-expanded`, `aria-controls="listbox-id"`, `aria-activedescendant="option-3"`, `aria-autocomplete="list"`.
+- Options: `role="option"`, unique `id`, `aria-selected` on the active one.
+- Announce result counts / "no results" via a polite `aria-live` region.
+- Focus stays in the input while navigating options (that's what `aria-activedescendant` is for).
+
+### 5. UX details
+
+Highlight the matched part of each suggestion; show loading only if it takes > ~200 ms (avoid flicker); keep previous results visible while loading new ones; handle IME composition (Chinese/Japanese input: don't search on every composition event); close on outside click; mobile: make the list scrollable above the keyboard.
+
+### 6. Performance
+
+Virtualize if the list can be long; memoize option rendering; keep the component lightweight (no heavy dependencies); lazy-load the popover code if the component is below the fold.
+
+<Callout type="interview">
+This is a classic frontend round. Hit: **headless hook + presentational components**, **debounce**, **AbortController / latest-request wins**, **client LRU cache**, **full WAI-ARIA combobox keyboard support**, **loading/empty/error states**, and a **flexible API** (async + local sources, `renderItem`). Linking to the backend typeahead (trie + CDN caching) is a bonus.
+</Callout>
+
+<Takeaways>
+- Split **logic (hook/state machine)** from **presentation** for reuse.
+- **Debounce**, **min length**, **client cache**; never show **stale responses** (abort + latest-wins).
+- Implement the **ARIA combobox** pattern with full keyboard support and live announcements.
+- Design a **flexible API**: async or local sources, custom rendering, sensible defaults.
+</Takeaways>
+
+<Quiz
+  id="fe-autocomplete"
+  questions={[
+    { q: 'Results for “ca” replace results for “cat” because the “ca” request was slower. How do you prevent this?', options: ['Debounce more', 'Abort the previous request and/or only accept the response for the latest query', 'Use a bigger server', 'Disable caching'], answer: 1, explain: 'Classic race condition; AbortController + latest-request checks fix it.' },
+    { q: 'Which attribute lets screen readers know which option is highlighted while focus stays in the input?', options: ['aria-label', 'aria-activedescendant', 'tabindex', 'aria-hidden'], answer: 1, explain: 'It points to the ID of the active option.' },
+    { q: 'Why debounce input?', options: ['To make typing slower', 'To avoid sending a request for every keystroke', 'For accessibility', 'To cache results'], answer: 1, explain: 'Fewer requests, less server load, fewer wasted renders.' },
+    { q: 'Why separate a headless hook from the UI?', options: ['Hooks are faster', 'Teams can reuse the behavior (state, keyboard, fetching) with their own markup and styles', 'It removes the need for tests', 'React requires it'], answer: 1, explain: 'Headless components maximize reuse across very different designs.' },
+  ]}
+/>

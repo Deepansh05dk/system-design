@@ -1,0 +1,126 @@
+---
+title: Design a News Feed UI
+slug: design-a-news-feed-ui
+description: The frontend half of the Twitter/Facebook feed. Component tree, normalized cache, cursor pagination, virtualization, optimistic likes and new-post handling.
+module: m8
+order: 3
+minutes: 20
+difficulty: Medium
+---
+
+<Callout type="problem">
+Design the frontend for a social media news feed: an endless scroll of posts with text, images and videos, likes and comments, new posts arriving while you read, used by people on cheap Android phones with flaky 3G and on fast laptops. It must feel instant, never jump around, and work with a screen reader.
+</Callout>
+
+## R: Requirements
+
+**Functional:** view an infinite feed; each post has author, text, media, like/comment/share; like a post; open comments; create a post; see that new posts are available.
+
+**Non-functional:** fast initial load (LCP < 2.5 s on mid-range mobile), smooth 60 fps scrolling, works on slow networks, accessible (keyboard + screen reader), handles thousands of loaded posts without slowing down.
+
+## A: Architecture
+
+<ArchFlow
+  title="Client architecture for a feed"
+  height={420}
+  nodes={[
+    { id: 'srv', label: 'Feed API / BFF', sub: 'cursor pages, SSE', kind: 'server', x: 110, y: 200 },
+    { id: 'api', label: 'API client layer', sub: 'fetch, retry, normalize', kind: 'service', x: 330, y: 200 },
+    { id: 'store', label: 'Normalized cache', sub: 'posts{}, users{}, feed ids[]', kind: 'cache', x: 560, y: 200 },
+    { id: 'feed', label: '<Feed>', sub: 'virtualized list', kind: 'client', icon: '📜', x: 790, y: 80 },
+    { id: 'item', label: '<FeedItem>', sub: 'memoized', kind: 'client', icon: '🧩', x: 790, y: 200 },
+    { id: 'comp', label: '<Composer>', sub: 'optimistic create', kind: 'client', icon: '✍️', x: 790, y: 320 },
+    { id: 'rt', label: 'Live updates', sub: 'SSE: new post IDs', kind: 'queue', x: 330, y: 340 },
+  ]}
+  edges={[
+    { from: 'srv', to: 'api', label: 'GET /feed?cursor' },
+    { from: 'api', to: 'store' },
+    { from: 'store', to: 'feed' },
+    { from: 'store', to: 'item' },
+    { from: 'comp', to: 'store', label: 'optimistic insert', dashed: true },
+    { from: 'srv', to: 'rt' },
+    { from: 'rt', to: 'store', label: '“12 new posts”' },
+  ]}
+  steps={[
+    { title: 'Server: paginated, embedded data', text: 'The feed API returns pages of posts with the authors embedded (no N+1 requests from the client) and a <code>nextCursor</code>. The first page can be server-rendered (SSR) for a fast LCP.', add: ['srv', 'api'], flow: ['srv>api'] },
+    { title: 'Normalize into a cache', text: 'The API layer normalizes responses: <code>posts[id]</code>, <code>users[id]</code>, and the feed as an ordered list of post IDs. A like updates one post object; every place showing it re-renders. (React Query / Apollo / RTK Query handle much of this.)', add: ['store'], flow: ['api>store'] },
+    { title: 'Render a virtualized list', text: '<code>&lt;Feed&gt;</code> renders only visible items (windowing). <code>&lt;FeedItem&gt;</code> is memoized so a like on one post doesn’t re-render the others. Media lazy-loads.', add: ['feed', 'item'], flow: ['store>feed', 'store>item'] },
+    { title: 'New posts: don’t jump the list', text: 'An SSE connection (or polling) announces new post IDs. Instead of inserting them at the top while the user reads (which shifts content), show a “12 new posts” pill; clicking scrolls to top and inserts them.', add: ['rt'], flow: ['srv>rt', 'rt>store'] },
+    { title: 'Create a post optimistically', text: 'The composer inserts a temporary post at the top immediately (with a pending state), sends the request with an idempotency key, then replaces the temp ID with the real one, or shows a retry option on failure.', add: ['comp'], flow: ['comp>store'] },
+  ]}
+/>
+
+## D: Data model (client)
+
+```ts
+type Post = { id: string; authorId: string; text: string; media: Media[];
+              likeCount: number; likedByMe: boolean; commentCount: number; createdAt: string };
+type User = { id: string; name: string; avatarUrl: string };
+type FeedState = { postIds: string[]; nextCursor: string | null; status: 'idle'|'loading'|'error';
+                   pendingNewIds: string[] };
+```
+
+Server data → cached & normalized. UI state (open comment boxes, composer draft) → local component state; draft also saved to `localStorage` so a refresh doesn't lose it.
+
+## I: Interface
+
+```http
+GET  /feed?cursor=<opaque>&limit=20  → { posts: [...with author], nextCursor }
+POST /posts                          { text, mediaIds }  Idempotency-Key: …
+POST /posts/:id/like  |  DELETE /posts/:id/like
+GET  /feed/stream (SSE)              → event: new_posts  data: { ids: [...] }
+```
+
+Why cursor pagination? New posts constantly arrive at the top; offset pagination would show duplicates (Module 4).
+
+## O: Optimizations & deep dives
+
+### Virtualization
+
+<VirtualListSim />
+
+Only render what's on screen (react-window, TanStack Virtual). With variable-height posts, measure items after render and cache heights. Keep a few items of overscan for smooth scrolling. Restore scroll position when the user navigates back.
+
+### Infinite scroll mechanics
+
+- An **IntersectionObserver** sentinel near the end triggers loading the next page (prefetch ~1–2 screens ahead).
+- Guard against duplicate requests (in-flight flag), and dedupe posts by ID.
+- Show skeletons while loading; an inline "Retry" on error (don't blank the whole feed).
+
+### Optimistic likes
+
+Update `likedByMe` and `likeCount` instantly; send the request; on failure roll back and show a toast. Rapid double-taps: debounce or send the final state (`PUT like: true/false`, idempotent) instead of toggling.
+
+### Media performance
+
+Responsive images (`srcset`), lazy loading below the fold, fixed aspect-ratio boxes to prevent layout shift (CLS), blur-up placeholders, videos autoplay muted only when visible (IntersectionObserver), pause when scrolled away.
+
+### Network resilience
+
+Cache the last feed (IndexedDB) to show something instantly on open / offline; queue actions (likes, posts) while offline and replay them when back (with idempotency keys).
+
+### Accessibility
+
+Use a semantic `<article>` per post inside a `role="feed"` container (with `aria-busy` while loading), meaningful alt text, visible focus, keyboard shortcuts (j/k to move between posts), and announce "12 new posts" via a polite live region. Virtualized lists must keep focus stable when rows unmount.
+
+<Callout type="interview">
+Cover: **component tree + normalized cache**, **cursor-based infinite scroll** with IntersectionObserver, **virtualization**, **"new posts" pill** instead of jumping content, **optimistic updates with rollback**, **image/video loading strategy**, **offline cache**, and **accessibility (role=feed, live regions, focus)**. Connect to the backend design: "the API returns IDs + embedded authors, using the fan-out design from the backend round".
+</Callout>
+
+<Takeaways>
+- Normalize server data; feed = ordered **list of IDs**; memoize items.
+- **Cursor pagination + IntersectionObserver** for infinite scroll; dedupe by ID.
+- **Virtualize** long lists; reserve media space to avoid CLS; lazy-load media.
+- **Optimistic updates** with rollback; **“N new posts”** pill instead of shifting content.
+- Plan **offline** (IndexedDB cache, queued actions) and **accessibility**.
+</Takeaways>
+
+<Quiz
+  id="fe-feed"
+  questions={[
+    { q: 'New posts arrive while the user is reading. Best UX?', options: ['Insert them at the top immediately', 'Show a “N new posts” button; insert when clicked', 'Reload the page', 'Ignore them until next visit'], answer: 1, explain: 'Avoids shifting the content the user is reading.' },
+    { q: 'What does list virtualization do?', options: ['Compresses images', 'Renders only the visible items (plus a few), keeping DOM size small', 'Caches API responses', 'Runs JS on a server'], answer: 1, explain: 'DOM size stays constant regardless of feed length.' },
+    { q: 'User likes a post and the request fails. With optimistic UI you should…', options: ['Keep it liked', 'Roll back the like and show an error/toast', 'Reload the feed', 'Retry forever silently'], answer: 1, explain: 'Optimistic updates must be reversible on failure.' },
+    { q: 'Which browser API is best for triggering “load more” near the end of the list?', options: ['setInterval', 'IntersectionObserver', 'scroll event with heavy calculations', 'MutationObserver'], answer: 1, explain: 'Efficient, async visibility detection without scroll-handler jank.' },
+  ]}
+/>

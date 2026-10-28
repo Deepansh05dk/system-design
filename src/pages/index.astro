@@ -1,4 +1,385 @@
 ---
-import Base from "../layouts/Base.astro";
+import Base from '../layouts/Base.astro';
+import { getLessonsByModule } from '../lib/lessons';
+import { url } from '../lib/url';
+
+const groups = await getLessonsByModule();
+const totalLessons = groups.reduce((s, g) => s + g.lessons.length, 0);
+const islandCount = Object.keys(import.meta.glob('../components/islands/*.tsx')).filter((p) => !/(Widget|MarkComplete|Quiz)\.tsx$/.test(p)).length;
+const first = groups[0].lessons[0];
+const steps = [
+  { icon: '🔥', title: 'The problem', text: 'Every lesson starts with a real situation that breaks, so you know why the idea exists.' },
+  { icon: '💡', title: 'The concept', text: 'Explained from zero in simple English, with analogies and links to what you know from frontend.' },
+  { icon: '🎮', title: 'Play with it', text: 'Simulators and step-by-step diagrams. Break things on purpose and watch what happens.' },
+  { icon: '🤔', title: 'Why this, not that?', text: 'Trade-off comparisons, so you can defend every choice.' },
+  { icon: '🎤', title: 'Interview angle', text: 'What interviewers ask, what strong answers sound like, and common mistakes.' },
+  { icon: '🧠', title: 'Quiz', text: 'Check yourself with explained answers. Your progress is saved in your browser.' },
+];
 ---
-<Base title="System Design Course"><h1>Home</h1></Base>
+
+<Base title="System Design Course" description="An interactive system design course from zero to interview-ready, built for frontend developers.">
+  <div class="home">
+    <section class="hero">
+      <div class="hero-text">
+        <span class="pill">For frontend developers · from zero to interview-ready</span>
+        <h1>Learn to <span class="grad">think in systems</span>.</h1>
+        <p class="lede">
+          Networking, databases, caching, queues, distributed systems, and 18 classic interview problems. Every concept
+          is explained from scratch, made interactive, and connected to the question that matters most in interviews: <b>why
+          this, not that?</b>
+        </p>
+        <div class="cta">
+          <a class="btn btn-primary btn-lg" id="start-btn" href={url(`learn/${first.id}`)}>Start learning →</a>
+          <a class="btn btn-lg" href={url('practice')}>Try the design canvas</a>
+        </div>
+        <div class="stats">
+          <div><b>{groups.length}</b><span>modules</span></div>
+          <div><b>{totalLessons}</b><span>lessons</span></div>
+          <div><b>{islandCount}</b><span>interactive tools</span></div>
+          <div><b>{totalLessons + 1}</b><span>quizzes</span></div>
+        </div>
+      </div>
+      <div class="hero-art" aria-hidden="true">
+        <svg viewBox="0 0 360 300">
+          <defs>
+            <linearGradient id="hg" x1="0" x2="1">
+              <stop offset="0" stop-color="#6366f1"></stop>
+              <stop offset="1" stop-color="#ec4899"></stop>
+            </linearGradient>
+          </defs>
+          <g stroke="var(--border-strong)" stroke-width="2" fill="none">
+            <path d="M60 150 L150 150"></path>
+            <path d="M190 150 L260 80"></path>
+            <path d="M190 150 L260 150"></path>
+            <path d="M190 150 L260 220"></path>
+            <path d="M300 80 L300 220" stroke-dasharray="5 5"></path>
+          </g>
+          <circle r="6" fill="url(#hg)"><animateMotion dur="2.2s" repeatCount="indefinite" path="M60 150 L150 150 L190 150 L260 80"></animateMotion></circle>
+          <circle r="6" fill="url(#hg)"><animateMotion dur="2.2s" begin="0.7s" repeatCount="indefinite" path="M60 150 L150 150 L190 150 L260 150"></animateMotion></circle>
+          <circle r="6" fill="url(#hg)"><animateMotion dur="2.2s" begin="1.4s" repeatCount="indefinite" path="M60 150 L150 150 L190 150 L260 220"></animateMotion></circle>
+          <g font-size="26" text-anchor="middle">
+            <rect x="20" y="125" width="50" height="50" rx="12" fill="var(--surface)" stroke="#0ea5e9" stroke-width="2"></rect>
+            <text x="45" y="159">💻</text>
+            <rect x="145" y="125" width="50" height="50" rx="12" fill="var(--surface)" stroke="#10b981" stroke-width="2"></rect>
+            <text x="170" y="159">⚖️</text>
+            <rect x="255" y="55" width="50" height="50" rx="12" fill="var(--surface)" stroke="#6366f1" stroke-width="2"></rect>
+            <text x="280" y="89">🖥️</text>
+            <rect x="255" y="125" width="50" height="50" rx="12" fill="var(--surface)" stroke="#ef4444" stroke-width="2"></rect>
+            <text x="280" y="159">⚡</text>
+            <rect x="255" y="195" width="50" height="50" rx="12" fill="var(--surface)" stroke="#8b5cf6" stroke-width="2"></rect>
+            <text x="280" y="229">🗄️</text>
+          </g>
+        </svg>
+      </div>
+    </section>
+
+    <section class="continue card" id="continue" hidden>
+      <div>
+        <div class="small muted">Continue where you left off</div>
+        <div class="cont-title" id="continue-title"></div>
+      </div>
+      <a class="btn btn-primary" id="continue-link" href="#">Continue →</a>
+    </section>
+
+    <section>
+      <h2>How every lesson works</h2>
+      <div class="steps">
+        {
+          steps.map((s, i) => (
+            <div class="step card">
+              <div class="step-icon">{s.icon}</div>
+              <div class="step-num">Step {i + 1}</div>
+              <div class="step-title">{s.title}</div>
+              <div class="small muted">{s.text}</div>
+            </div>
+          ))
+        }
+      </div>
+    </section>
+
+    <section>
+      <h2>The path</h2>
+      <p class="muted">Go in order: each module builds on the previous one. Modules 0 and 1 assume no prior knowledge of networks or databases.</p>
+      <div class="modules">
+        {
+          groups.map(({ module, lessons }) => (
+            <a class="module card" href={lessons[0] ? url(`learn/${lessons[0].id}`) : '#'} style={`--mc:${module.color}`}>
+              <div class="mod-top">
+                <span class="mod-icon">{module.icon}</span>
+                <span class="mod-num">Module {module.number}</span>
+                <span class="mod-prog" data-module={module.id} data-ids={lessons.map((l) => l.id).join(',')}>
+                  0/{lessons.length}
+                </span>
+              </div>
+              <div class="mod-title">{module.title}</div>
+              <div class="small muted">{module.blurb}</div>
+              <div class="mod-bar">
+                <div data-bar={module.id} />
+              </div>
+              <ul class="mod-lessons">
+                {lessons.slice(0, 4).map((l) => (
+                  <li>{l.data.title}</li>
+                ))}
+                {lessons.length > 4 && <li class="muted">+ {lessons.length - 4} more</li>}
+              </ul>
+            </a>
+          ))
+        }
+      </div>
+    </section>
+
+    <section class="extras">
+      <a class="extra card" href={url('practice')}>
+        <span>🧩</span>
+        <div>
+          <b>Design Canvas</b>
+          <div class="small muted">Build architectures for 5 prompts and get feedback.</div>
+        </div>
+      </a>
+      <a class="extra card" href={url('flashcards')}>
+        <span>🃏</span>
+        <div>
+          <b>Trade-off Flashcards</b>
+          <div class="small muted">The classic “why this, not that?” questions.</div>
+        </div>
+      </a>
+      <a class="extra card" href={url('final-exam')}>
+        <span>🏆</span>
+        <div>
+          <b>Final Exam</b>
+          <div class="small muted">26 mixed questions across the whole course.</div>
+        </div>
+      </a>
+      <a class="extra card" href={url('glossary')}>
+        <span>📖</span>
+        <div>
+          <b>Glossary</b>
+          <div class="small muted">Every term in one or two sentences.</div>
+        </div>
+      </a>
+    </section>
+  </div>
+</Base>
+
+<script>
+  import { getDone } from '../lib/progress';
+  const done = new Set(getDone());
+  let firstUndone: HTMLAnchorElement | null = null;
+  document.querySelectorAll<HTMLElement>('[data-ids]').forEach((el) => {
+    const ids = el.dataset.ids!.split(',').filter(Boolean);
+    const count = ids.filter((id) => done.has(id)).length;
+    el.textContent = `${count}/${ids.length}`;
+    const bar = document.querySelector<HTMLElement>(`[data-bar="${el.dataset.module}"]`);
+    if (bar) bar.style.width = `${ids.length ? (count / ids.length) * 100 : 0}%`;
+  });
+  // continue where you left off: first lesson in course order not yet done
+  const links = [...document.querySelectorAll<HTMLAnchorElement>('.nav a[data-lesson]')];
+  firstUndone = links.find((a) => !done.has(a.dataset.lesson!)) ?? null;
+  if (done.size > 0 && firstUndone) {
+    const box = document.getElementById('continue');
+    const title = document.getElementById('continue-title');
+    const link = document.getElementById('continue-link') as HTMLAnchorElement | null;
+    if (box && title && link) {
+      title.textContent = firstUndone.textContent?.replace(/^\s*\d+\s*/, '').trim() ?? '';
+      link.href = firstUndone.href;
+      box.hidden = false;
+      const start = document.getElementById('start-btn') as HTMLAnchorElement | null;
+      if (start) {
+        start.href = firstUndone.href;
+        start.textContent = 'Continue learning →';
+      }
+    }
+  }
+</script>
+
+<style>
+  .home {
+    max-width: 1120px;
+    margin: 0 auto;
+  }
+  .hero {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 2rem;
+    align-items: center;
+    padding: 1.5rem 0 2rem;
+  }
+  h1 {
+    font-size: clamp(2.2rem, 5.5vw, 3.6rem);
+    line-height: 1.05;
+    letter-spacing: -0.035em;
+    margin: 0.8rem 0;
+  }
+  .grad {
+    background: linear-gradient(90deg, #6366f1, #ec4899);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .lede {
+    font-size: 1.15rem;
+    color: var(--text-soft);
+    max-width: 620px;
+  }
+  .cta {
+    display: flex;
+    gap: 0.7rem;
+    flex-wrap: wrap;
+    margin: 1.4rem 0;
+  }
+  .btn-lg {
+    padding: 0.7rem 1.2rem;
+    font-size: 1rem;
+  }
+  .stats {
+    display: flex;
+    gap: 1.8rem;
+    flex-wrap: wrap;
+  }
+  .stats div {
+    display: flex;
+    flex-direction: column;
+  }
+  .stats b {
+    font-size: 1.7rem;
+    font-weight: 850;
+  }
+  .stats span {
+    font-size: 0.8rem;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .hero-art svg {
+    width: 100%;
+    max-width: 420px;
+  }
+  .continue {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem 1.2rem;
+    margin-bottom: 1rem;
+    border-color: var(--accent);
+  }
+  .continue[hidden] {
+    display: none;
+  }
+  .cont-title {
+    font-weight: 700;
+    font-size: 1.05rem;
+  }
+  h2 {
+    font-size: 1.5rem;
+    margin: 2.2rem 0 0.6rem;
+    letter-spacing: -0.01em;
+  }
+  .steps {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 0.7rem;
+  }
+  .step {
+    padding: 0.9rem;
+  }
+  .step-icon {
+    font-size: 1.5rem;
+  }
+  .step-num {
+    font-size: 0.7rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--accent-text);
+    margin-top: 0.3rem;
+  }
+  .step-title {
+    font-weight: 700;
+    margin-bottom: 0.2rem;
+  }
+  .modules {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 0.9rem;
+  }
+  .module {
+    padding: 1.1rem;
+    text-decoration: none;
+    color: var(--text);
+    border-top: 4px solid var(--mc);
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .module:hover {
+    transform: translateY(-2px);
+  }
+  .mod-top {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .mod-icon {
+    font-size: 1.4rem;
+  }
+  .mod-num {
+    font-size: 0.72rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--mc);
+    flex: 1;
+  }
+  .mod-prog {
+    font-size: 0.8rem;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+  }
+  .mod-title {
+    font-weight: 750;
+    font-size: 1.1rem;
+    margin: 0.4rem 0 0.3rem;
+  }
+  .mod-bar {
+    height: 5px;
+    background: var(--border);
+    border-radius: 99px;
+    margin: 0.7rem 0 0.5rem;
+    overflow: hidden;
+  }
+  .mod-bar div {
+    height: 100%;
+    width: 0;
+    background: var(--mc);
+  }
+  .mod-lessons {
+    margin: 0;
+    padding-left: 1.1rem;
+    font-size: 0.85rem;
+    color: var(--text-soft);
+  }
+  .extras {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 0.8rem;
+    margin: 2.5rem 0 1rem;
+  }
+  .extra {
+    display: flex;
+    gap: 0.8rem;
+    align-items: center;
+    padding: 1rem;
+    text-decoration: none;
+    color: var(--text);
+  }
+  .extra > span {
+    font-size: 1.8rem;
+  }
+  @media (max-width: 800px) {
+    .hero {
+      grid-template-columns: 1fr;
+    }
+    .hero-art {
+      display: none;
+    }
+  }
+</style>

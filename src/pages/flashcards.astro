@@ -1,0 +1,38 @@
+---
+import Base from '../layouts/Base.astro';
+import Flashcards from '../components/islands/Flashcards';
+import { flashcards } from '../data/flashcards';
+---
+
+<Base title="Trade-off Flashcards" description="Practice the classic “why this, not that?” questions." current="flashcards">
+  <div class="page">
+    <div class="kicker">🃏 Practice</div>
+    <h1>Trade-off Flashcards</h1>
+    <p class="lede">
+      {flashcards.length} of the most common “why this, not that?” questions. Answer out loud first, then flip. Mark the
+      ones you knew; the rest come back for review. Progress is saved in this browser.
+    </p>
+    <Flashcards client:load title="All decks" />
+  </div>
+</Base>
+
+<style>
+  .page {
+    max-width: 840px;
+    margin: 0 auto;
+  }
+  .kicker {
+    font-weight: 800;
+    color: var(--accent-text);
+    font-size: 0.85rem;
+  }
+  h1 {
+    font-size: clamp(1.8rem, 4vw, 2.4rem);
+    margin: 0.3rem 0;
+    letter-spacing: -0.02em;
+  }
+  .lede {
+    color: var(--text-soft);
+    font-size: 1.05rem;
+  }
+</style>

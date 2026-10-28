@@ -1,0 +1,106 @@
+---
+title: Design a Collaborative Editor (Google Docs)
+slug: design-a-collaborative-editor
+description: Many people editing the same document live. Operational Transformation vs CRDTs, presence and cursors, offline editing, and the server side.
+module: m8
+order: 5
+minutes: 22
+difficulty: Hard
+---
+
+<Callout type="problem">
+Five people edit the same Google Doc at the same time. Everyone sees others' cursors and changes within a fraction of a second. Two people type in the same sentence simultaneously, and everyone still ends up with the **same** document. Someone on a train edits offline for an hour and it merges cleanly when they reconnect. **How do concurrent edits not destroy each other?**
+</Callout>
+
+## Requirements
+
+**Functional:** real-time co-editing of rich text; see collaborators' cursors/selections and presence; undo/redo per user; version history; comments; offline editing that syncs later.
+
+**Non-functional:** local typing must feel **instant** (never wait for the server); changes appear for others in < 1 s; all copies **converge** to the same document; no lost edits; scale to many documents (each with a handful to ~100 editors).
+
+## The core problem: concurrent edits
+
+Each user edits their **local copy** immediately (local-first, so typing never lags), then sends **operations** like "insert 'x' at position 5" to others. But positions change when someone else edits earlier in the text at the same time:
+
+<OtSim />
+
+Two families of solutions make all copies converge:
+
+<Versus
+  items={[
+    { name: 'Operational Transformation (OT)', icon: '🔀', pros: ['Transform concurrent ops against each other (shift positions) so they apply correctly', 'Proven at huge scale: Google Docs uses OT', 'Compact operations'], cons: ['Usually needs a <b>central server</b> to order operations', 'Transformation rules are tricky to get right for rich text', 'Offline editing for long periods is harder'], use: 'Server-centric real-time editors (Google Docs, many classic collaborative tools).' },
+    { name: 'CRDTs', icon: '🧬', pros: ['Data structures where concurrent edits merge automatically, in any order', 'No central authority needed: peer-to-peer and offline-first friendly', 'Libraries: Yjs, Automerge'], cons: ['Extra metadata (each character gets a unique ID) → more memory', 'Some semantics (e.g. intent-preserving rich text) are hard'], use: 'Offline-first and decentralized apps (Figma-like multiplayer uses CRDT-inspired ideas; Notion, Linear and many editors use CRDT/related techniques).' },
+  ]}
+/>
+
+<Term k="crdt">CRDTs</Term> avoid position shifting by giving every character a **unique, stable ID** and inserting "after character ID X" instead of "at index 5". <Term k="ot">OT</Term> keeps simple indexes but rewrites operations to account for what happened concurrently.
+
+## Architecture (OT-style, server-ordered)
+
+<ArchFlow
+  title="Real-time collaboration architecture"
+  height={420}
+  nodes={[
+    { id: 'a', label: 'Editor A', sub: 'local doc + pending ops', kind: 'client', x: 90, y: 100 },
+    { id: 'b', label: 'Editor B', kind: 'client', x: 90, y: 320 },
+    { id: 'gw', label: 'WebSocket gateway', sub: 'sticky by doc', kind: 'gateway', x: 300, y: 210, w: 160 },
+    { id: 'ds', label: 'Document session', sub: 'one owner per doc', kind: 'service', icon: '📄', x: 540, y: 210 },
+    { id: 'log', label: 'Op log', sub: 'append-only', kind: 'db', x: 780, y: 120 },
+    { id: 'snap', label: 'Snapshots', sub: 'periodic', kind: 'storage', x: 780, y: 300 },
+    { id: 'pres', label: 'Presence', sub: 'cursors (ephemeral)', kind: 'cache', x: 540, y: 60 },
+  ]}
+  edges={[
+    { from: 'a', to: 'gw', label: 'op (rev 41)' },
+    { from: 'b', to: 'gw' },
+    { from: 'gw', to: 'ds' },
+    { from: 'ds', to: 'log', label: 'append rev 42' },
+    { from: 'ds', to: 'snap', dashed: true },
+    { from: 'gw', to: 'pres', dashed: true },
+  ]}
+  steps={[
+    { title: 'Apply locally, send the operation', text: 'User A types; the editor applies it to the local document instantly and sends <code>{op, baseRevision: 41}</code> over a WebSocket. Unacknowledged ops are kept as “pending”.', add: ['a', 'gw'], flow: ['a>gw'] },
+    { title: 'One place orders operations per document', text: 'All connections for a document are routed to one <b>document session</b> (consistent hashing on doc ID). It transforms the op against any ops committed since revision 41, assigns revision 42 and appends it to the <b>op log</b>.', add: ['ds', 'log'], flow: ['gw>ds', 'ds>log'] },
+    { title: 'Broadcast to other editors', text: 'The transformed op is sent to every other editor of the doc, who transform it against their own pending ops and apply it. The author gets an ACK and clears it from pending.', add: ['b'], flow: ['ds>gw', 'gw>b'] },
+    { title: 'Snapshots keep loading fast', text: 'Replaying a million ops to open a document would be slow. Periodically save a <b>snapshot</b> (doc at revision N); loading = snapshot + ops after N. Version history comes from snapshots + the op log.', add: ['snap'], flow: ['ds>snap'] },
+    { title: 'Presence is separate and ephemeral', text: 'Cursor positions and “who’s here” change constantly and don’t need durability: broadcast them through a lightweight presence channel (throttled to ~10–20 updates/sec), never stored in the op log.', add: ['pres'], flow: ['gw>pres'] },
+  ]}
+/>
+
+With CRDTs (e.g. Yjs), the server can be simpler: it relays and stores updates (or a merged state) without transforming, and peers can even sync directly.
+
+## Deep dives
+
+**Undo/redo.** Must be **per user**: Ctrl+Z undoes *my* last change, not my colleague's. Implemented as inverse operations (transformed like any other op).
+
+**Offline.** Queue local ops (persist in IndexedDB); on reconnect, send them with their base revision. OT rebases them on the server; CRDTs merge naturally. Long offline sessions favor CRDTs.
+
+**Permissions.** Check on connect and on every op (view vs comment vs edit). Revoking access closes the socket.
+
+**Scaling.** Each document is small and hot only while being edited: route each doc to one session server (sharded by doc ID), keep active docs in memory, evict idle ones. Millions of documents scale horizontally because they're independent.
+
+**Rich text.** Edits are not just characters: formatting ranges, lists, tables, embedded images. Editors like ProseMirror, Tiptap, Lexical and Slate model the document as a tree with OT/CRDT bindings (y-prosemirror, etc.).
+
+<Callout type="frontend">
+This is one of the most frontend-heavy system designs: the **client holds the source of truth for what the user sees**, applies changes optimistically, rebases remote changes, renders remote cursors without jank (throttle presence, use CSS transforms), and keeps everything accessible. Mentioning ProseMirror/Yjs shows practical awareness.
+</Callout>
+
+<Callout type="interview">
+Key points: **local-first edits + operations over WebSocket**, **convergence via OT (server orders/transforms) or CRDTs (commutative merges)**, **one session owner per document**, **append-only op log + snapshots**, **separate ephemeral presence channel**, **per-user undo**, and **offline queue**. Be ready to explain the position-shifting example.
+</Callout>
+
+<Takeaways>
+- Apply edits **locally first**; send **operations**, not whole documents.
+- Concurrent edits need **OT** (transform positions; usually server-ordered) or **CRDTs** (unique IDs, automatic merge, offline-friendly).
+- Route each document to **one session**; store an **op log + snapshots**.
+- **Presence/cursors** are ephemeral and throttled; **undo is per user**.
+</Takeaways>
+
+<Quiz
+  id="fe-collab"
+  questions={[
+    { q: 'Why must concurrent operations be transformed (OT)?', options: ['To compress them', 'Because an index like “insert at 5” may be wrong after someone else inserted text earlier', 'For encryption', 'To save bandwidth'], answer: 1, explain: 'Positions shift when concurrent edits happen before them.' },
+    { q: 'What makes CRDTs good for offline editing?', options: ['They need a central server', 'Concurrent changes merge automatically in any order, without a central coordinator', 'They store less data', 'They don’t support text'], answer: 1, explain: 'Commutative merges let devices sync whenever they reconnect.' },
+    { q: 'Should cursor positions be stored in the document’s op log?', options: ['Yes, always', 'No; presence is ephemeral and sent on a separate lightweight channel', 'Only for admins', 'Only on desktop'], answer: 1, explain: 'Cursors change constantly and don’t need durability.' },
+    { q: 'Why keep periodic snapshots?', options: ['For thumbnails', 'So loading a document doesn’t require replaying the entire operation history', 'To replace the op log', 'For permissions'], answer: 1, explain: 'Snapshot + recent ops = fast load.' },
+  ]}
+/>
