@@ -1,0 +1,113 @@
+---
+title: Vertical vs Horizontal Scaling
+slug: vertical-vs-horizontal-scaling
+description: Bigger machine or more machines? The first scaling decision, and why stateless servers make everything easier.
+module: m2
+order: 1
+minutes: 12
+---
+
+<Callout type="problem">
+Your app runs on one server. Traffic doubles every month. The CPU is at 95% at peak and pages are timing out. You have two options: **buy a bigger server**, or **add more servers**. Which one, and what has to change in your code for the second one to work?
+</Callout>
+
+## Two ways to scale
+
+- <Term k="vertical-scaling">**Vertical scaling (scale up)**</Term>: replace the machine with a bigger one: more CPU, more RAM, faster disk.
+- <Term k="horizontal-scaling">**Horizontal scaling (scale out)**</Term>: add more machines and split the work between them.
+
+Play with traffic, crash a machine, and compare:
+
+<ScalingSim />
+
+<Versus
+  items={[
+    { name: 'Vertical (scale up)', icon: '⬆️', pros: ['No code changes', 'Simple to operate: one machine', 'No network calls between machines'], cons: ['Hard ceiling: there is a biggest machine', 'Cost grows faster than capacity', '<b>Single point of failure</b>', 'Upgrading often means downtime'], use: 'Early stage, or components that are hard to split (often the primary database at first).' },
+    { name: 'Horizontal (scale out)', icon: '➡️', pros: ['Nearly unlimited scale', 'Cheap commodity machines', 'One machine dying is no big deal', 'Scale up and down with traffic (auto-scaling)'], cons: ['Needs a load balancer', 'Servers must be <b>stateless</b>', 'More moving parts; distributed systems problems'], use: 'Web and app servers, almost always. Later, databases via replication and sharding.' },
+  ]}
+/>
+
+## The key to scaling out: stateless servers
+
+Imagine a user logs in and their session is stored **in the memory of Server 1**. The next request goes to Server 2, which has no idea who they are. They're logged out!
+
+A <Term k="stateless">stateless</Term> server keeps **no user-specific data in its own memory between requests**. Any state is moved to a shared place:
+
+<ArchFlow
+  title="Moving state out of the app servers"
+  height={330}
+  nodes={[
+    { id: 'u', label: 'Users', kind: 'user', x: 90, y: 165 },
+    { id: 'lb', label: 'Load balancer', kind: 'lb', x: 290, y: 165 },
+    { id: 's1', label: 'App server 1', sub: 'stateless', kind: 'server', x: 500, y: 70 },
+    { id: 's2', label: 'App server 2', sub: 'stateless', kind: 'server', x: 500, y: 165 },
+    { id: 's3', label: 'App server 3', sub: 'stateless', kind: 'server', x: 500, y: 260 },
+    { id: 'redis', label: 'Redis', sub: 'sessions', kind: 'cache', x: 760, y: 70 },
+    { id: 'db', label: 'Database', sub: 'user data', kind: 'db', x: 760, y: 190 },
+    { id: 's3b', label: 'Object storage', sub: 'uploaded files', kind: 'storage', x: 760, y: 300 },
+  ]}
+  edges={[
+    { from: 'u', to: 'lb' },
+    { from: 'lb', to: 's1' },
+    { from: 'lb', to: 's2' },
+    { from: 'lb', to: 's3' },
+    { from: 's1', to: 'redis' },
+    { from: 's2', to: 'redis' },
+    { from: 's3', to: 'redis' },
+    { from: 's1', to: 'db' },
+    { from: 's2', to: 'db' },
+    { from: 's3', to: 'db' },
+    { from: 's2', to: 's3b' },
+    { from: 's3', to: 's3b' },
+  ]}
+  steps={[
+    { title: 'Stateful: the problem', text: 'If each server keeps sessions and uploaded files on its own memory/disk, a user must always hit the same server. If that server dies, their session and files are gone.', add: ['u', 'lb', 's1', 's2', 's3'], flow: ['u>lb', 'lb>s1'] },
+    { title: 'Sessions → shared store', text: 'Store sessions in a shared, fast store like <b>Redis</b> (or use signed tokens like JWTs that the client sends each time). Now any server can recognise any user.', add: ['redis'], flow: ['s2>redis'] },
+    { title: 'Data → database', text: 'Persistent data lives in the database, not in server memory.', add: ['db'], flow: ['s1>db', 's3>db'] },
+    { title: 'Files → object storage', text: 'Uploaded files go to object storage (S3), not the server’s local disk.', add: ['s3b'], flow: ['s3>s3b'] },
+    { title: 'Result: servers are interchangeable', text: 'Now app servers are like identical cattle, not unique pets. Add 10 more at peak, remove them at night, replace a dead one. The load balancer can send any request anywhere.', flow: ['lb>s1', 'lb>s2', 'lb>s3'] },
+  ]}
+/>
+
+<Callout type="analogy">
+A stateless server is like a bank teller who looks up your account on the central system. You can go to **any** counter. A stateful server is a teller who keeps your file in their own drawer. You must wait for **that** teller, and if they go home sick, your file is stuck.
+</Callout>
+
+<Callout type="frontend">
+This is the same idea as keeping React components pure and putting shared state in a store (Redux, Zustand) or on the server. Components that don't hold hidden state are easy to reuse and replace. Servers too.
+</Callout>
+
+## Sticky sessions: a shortcut with a cost
+
+Some load balancers support **sticky sessions** (session affinity): the same user always goes to the same server, usually via a cookie. This lets stateful apps scale a bit, but:
+- load becomes uneven (some servers get the heavy users),
+- when a server dies, its users lose their sessions,
+- scaling down is harder.
+
+Prefer stateless servers; use stickiness only where it's truly needed (e.g. a WebSocket connection naturally stays on one server).
+
+## Auto-scaling
+
+With stateless servers in the cloud, you can **auto-scale**: add servers when CPU > 70% or request rate rises, remove them when it falls. You pay for what you use. Keep a minimum count across multiple **availability zones** (separate data centers) so one zone failing doesn't take you down.
+
+<Callout type="interview">
+Start simple and evolve out loud: "We start with a single server. To scale, first I make the app servers **stateless** (sessions in Redis, files in S3), then put them behind a **load balancer** with auto-scaling. The database scales separately: first vertically, then read replicas, then sharding if writes demand it." This narrative is exactly what interviewers want to hear.
+</Callout>
+
+<Takeaways>
+- **Vertical** = bigger machine: simple, but limited, costly and a single point of failure.
+- **Horizontal** = more machines: scalable and resilient, but needs a load balancer and **stateless** servers.
+- Move state to shared stores: **sessions → Redis/JWT, data → DB, files → object storage**.
+- In practice: app servers scale **horizontally**; databases often start **vertical**, then replicas and shards.
+</Takeaways>
+
+<Quiz
+  id="scaling"
+  questions={[
+    { q: 'Users get randomly logged out after you add a second server. Most likely cause?', options: ['The load balancer is broken', 'Sessions are stored in each server’s memory (stateful servers)', 'DNS TTL', 'The database is too slow'], answer: 1, explain: 'Requests alternate between servers; the one without the session in memory treats the user as logged out. Move sessions to a shared store.' },
+    { q: 'Which is a disadvantage of vertical scaling?', options: ['Requires stateless servers', 'Has a hard upper limit and is a single point of failure', 'Needs a load balancer', 'Requires code changes'], answer: 1, explain: 'There’s always a biggest machine, and if it dies, everything dies.' },
+    { q: 'Where should user-uploaded profile pictures be stored in a horizontally scaled app?', options: ['On the local disk of the server that received the upload', 'In shared object storage like S3', 'In server memory', 'In the load balancer'], answer: 1, explain: 'Local disk only exists on one server. Shared object storage is reachable from all servers.' },
+    { q: 'What is a downside of sticky sessions?', options: ['They make servers stateless', 'Uneven load, and users lose sessions if their server dies', 'They require HTTPS', 'They make auto-scaling easier'], answer: 1, explain: 'Stickiness ties users to servers, which hurts balancing and resilience.' },
+    { q: 'Which component is typically the LAST to be scaled horizontally?', options: ['Web servers', 'The relational database (especially writes)', 'Static files', 'The CDN'], answer: 1, explain: 'Stateless app servers scale out easily; databases hold state, so scaling their writes (sharding) is hardest and usually comes later.' },
+  ]}
+/>

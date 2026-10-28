@@ -1,0 +1,102 @@
+---
+title: Proxies & API Gateways
+slug: proxies-and-api-gateway
+description: Forward proxies, reverse proxies and API gateways. The “front door” of your system and what it should handle.
+module: m2
+order: 9
+minutes: 11
+---
+
+<Callout type="problem">
+You have 12 microservices. Every one of them needs to check auth tokens, rate-limit abusive clients, log requests, handle CORS, and terminate TLS. Writing that 12 times in 3 languages is a nightmare. And the mobile app has to know 12 different hostnames. **Where should these shared concerns live?**
+</Callout>
+
+## Proxy basics
+
+A **proxy** is a server that sits between two parties and forwards traffic. The difference is **whose side it's on**:
+
+<Versus
+  items={[
+    { name: 'Forward proxy', icon: '🧑‍💻→', pros: ['Sits in front of <b>clients</b>', 'Hides the clients from the internet', 'Company firewalls, content filtering, VPN-like privacy, caching for an office'], use: 'Clients choose to use it. The server sees the proxy, not the real client.' },
+    { name: 'Reverse proxy', icon: '→🖥️', pros: ['Sits in front of <b>servers</b>', 'Hides the servers from clients', 'Load balancing, TLS termination, caching, compression, routing'], use: 'Servers use it. The client thinks the proxy IS the server. Nginx, HAProxy, Envoy, Traefik.' },
+  ]}
+/>
+
+A load balancer is a kind of reverse proxy. In system design, "proxy" almost always means <Term k="reverse-proxy">**reverse proxy**</Term>.
+
+## API gateway: a smart reverse proxy for APIs
+
+An <Term k="api-gateway">API gateway</Term> is the single front door for all API calls. It handles **cross-cutting concerns** so services don't have to:
+
+<ArchFlow
+  title="API gateway in front of microservices"
+  height={360}
+  nodes={[
+    { id: 'web', label: 'Web app', kind: 'client', x: 90, y: 90 },
+    { id: 'mob', label: 'Mobile app', kind: 'mobile', x: 90, y: 260 },
+    { id: 'gw', label: 'API Gateway', sub: 'auth · rate limit · routing', kind: 'gateway', x: 360, y: 175, w: 170 },
+    { id: 'auth', label: 'Auth service', kind: 'service', x: 640, y: 40 },
+    { id: 'users', label: 'User service', kind: 'service', x: 640, y: 130 },
+    { id: 'orders', label: 'Order service', kind: 'service', x: 640, y: 220 },
+    { id: 'pay', label: 'Payment service', kind: 'service', x: 640, y: 310 },
+  ]}
+  edges={[
+    { from: 'web', to: 'gw', label: 'HTTPS' },
+    { from: 'mob', to: 'gw', label: 'HTTPS' },
+    { from: 'gw', to: 'auth', label: 'verify token' },
+    { from: 'gw', to: 'users', label: '/users/*' },
+    { from: 'gw', to: 'orders', label: '/orders/*' },
+    { from: 'gw', to: 'pay', label: '/payments/*' },
+  ]}
+  steps={[
+    { title: 'One entry point', text: 'All clients call <code>api.myapp.com</code>. They don’t know or care how many services exist behind it.', add: ['web', 'mob', 'gw'], flow: ['web>gw', 'mob>gw'] },
+    { title: 'Authenticate once', text: 'The gateway validates the token (itself, or via the auth service) and passes the user ID to services in a header. Services can trust it.', add: ['auth'], flow: ['gw>auth', 'auth>gw'] },
+    { title: 'Route by path', text: 'Requests are routed by path, header or version: <code>/orders/*</code> → order service. Services can be moved, split or versioned without clients changing.', add: ['users', 'orders', 'pay'], flow: ['gw>orders'] },
+    { title: 'Everything else, in one place', text: 'Rate limiting, request logging and tracing, TLS termination, CORS, request/response transformation, caching, and canary releases (send 5% of traffic to v2).', highlight: ['gw'] },
+  ]}
+/>
+
+Typical gateway responsibilities:
+- **Authentication** (and coarse authorization)
+- **Rate limiting & quotas** per user / API key
+- **Routing** and API versioning
+- **TLS termination**
+- **Request aggregation** (one client call → several service calls → one combined response)
+- **Observability:** logs, metrics, trace IDs
+- **Protocol translation:** e.g. public REST → internal gRPC
+
+Examples: Kong, AWS API Gateway, Apigee, Envoy-based gateways, Nginx.
+
+## Backend for Frontend (BFF)
+
+A variation you'll like as a frontend dev: a **separate gateway per client type**. The mobile BFF returns small, mobile-shaped payloads; the web BFF returns richer data. Each frontend team owns its BFF. GraphQL servers often play this role.
+
+<Callout type="frontend">
+If you've written a Next.js API route that calls three backend services and merges the results for one page, you've built a tiny BFF. That's exactly the pattern.
+</Callout>
+
+## Watch out
+
+- The gateway is on **every request**, so it must be **fast, horizontally scaled and highly available**. Otherwise it's a single point of failure and a bottleneck.
+- Keep **business logic** out of it. Gateways that grow into "god services" become a deployment bottleneck for every team.
+
+<Callout type="interview">
+In microservice designs, draw: **Client → CDN → Load balancer → API Gateway → services**. One sentence is enough: "The gateway handles auth, rate limiting and routing, so services focus on business logic." For a monolith, a load balancer/reverse proxy alone is fine. Don't add a gateway just because.
+</Callout>
+
+<Takeaways>
+- **Forward proxy** = on the client's side. **Reverse proxy** = on the server's side (what we use in designs).
+- An **API gateway** is a reverse proxy for APIs: **auth, rate limiting, routing, TLS, logging, aggregation**.
+- **BFF:** a gateway tailored per client (web / mobile).
+- Keep the gateway **thin, fast and redundant**.
+</Takeaways>
+
+<Quiz
+  id="proxies"
+  questions={[
+    { q: 'A company routes all employee web traffic through a server that filters sites. That server is a…', options: ['Reverse proxy', 'Forward proxy', 'API gateway', 'CDN'], answer: 1, explain: 'It acts on behalf of clients going out to the internet.' },
+    { q: 'Which is NOT a typical API gateway responsibility?', options: ['Rate limiting', 'Token validation', 'Computing an order’s tax and discounts', 'Routing /orders/* to the order service'], answer: 2, explain: 'Business logic belongs in services. Gateways handle cross-cutting concerns.' },
+    { q: 'What is a Backend-for-Frontend (BFF)?', options: ['A database for the frontend', 'A gateway layer tailored to one client type (e.g. mobile)', 'A CSS framework', 'A CDN feature'], answer: 1, explain: 'Each client gets an API shaped to its needs, owned by that client’s team.' },
+    { q: 'Why must an API gateway be horizontally scaled and redundant?', options: ['It stores all the data', 'Every request passes through it, so it’s a potential bottleneck and single point of failure', 'It runs the database', 'It needs a lot of disk'], answer: 1, explain: 'Anything on the critical path of all traffic needs redundancy.' },
+  ]}
+/>

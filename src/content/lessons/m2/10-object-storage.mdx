@@ -1,0 +1,93 @@
+---
+title: Object Storage (S3) & Files
+slug: object-storage
+description: Where images, videos and backups really live, why they don't go in your database, and how clients upload directly with pre-signed URLs.
+module: m2
+order: 10
+minutes: 12
+---
+
+<Callout type="problem">
+Users upload 5 million photos a day, about 2 MB each. That's 10 TB a day. Storing them in a database column would make backups enormous, queries slow and costs huge. Storing them on your app servers' disks breaks as soon as you have two servers. **Where do files go?**
+</Callout>
+
+## Three kinds of storage
+
+| Type | Think of it as | Accessed by | Example | Good for |
+|---|---|---|---|---|
+| **Block storage** | A raw hard disk attached to one machine | The OS, as a disk | AWS EBS | Database files, OS disks |
+| **File storage** | A shared network folder | File paths (`/shared/a.txt`) | AWS EFS, NFS | Legacy apps that need a shared filesystem |
+| **Object storage** | A huge key → file map with an HTTP API | Key / URL (`PUT /bucket/photos/42.jpg`) | **Amazon S3**, Google Cloud Storage, Azure Blob, Cloudflare R2 | Images, video, backups, logs, static sites, data lakes |
+
+<Term k="object-storage">Object storage</Term> is the default answer for files in system design.
+
+## Why object storage?
+
+- **Practically unlimited** size, with no capacity planning.
+- **Very durable:** S3 is designed for 99.999999999% ("eleven nines") durability by storing copies across multiple data centers.
+- **Cheap**, with cheaper "cold" tiers for rarely accessed data (S3 Glacier).
+- **HTTP API**, works naturally with **CDNs**.
+- **Metadata** per object (content type, custom tags).
+
+Limitations: objects are written whole (no editing the middle of a file), and there are no rich queries. That's why you store the **metadata in your database** and the **bytes in object storage**:
+
+```sql
+-- database row (small, queryable)
+photos(id=991, user_id=7, s3_key='photos/7/991.jpg', width=1080, height=1350, created_at=...)
+```
+
+## Uploads: don't proxy big files through your servers
+
+If every 2 GB video passes through your API servers, they spend their time copying bytes. Instead, use a <Term k="presigned-url">**pre-signed URL**</Term>: the server gives the client a temporary, signed permission to upload **directly** to object storage.
+
+<SequenceFlow
+  title="Direct upload with a pre-signed URL"
+  actors={[
+    { id: 'c', label: 'Client', icon: '📱' },
+    { id: 'api', label: 'API server', icon: '🖥️' },
+    { id: 's3', label: 'Object storage', icon: '🪣' },
+    { id: 'q', label: 'Queue / workers', icon: '👷' },
+  ]}
+  messages={[
+    { from: 'c', to: 'api', label: 'POST /uploads {type: image/jpeg, size}', note: 'The client asks for permission to upload. The API checks auth, file type and size limits.' },
+    { from: 'api', to: 'c', label: 'pre-signed PUT URL (valid 10 min)', dashed: true, note: 'The API creates a DB row with status <code>pending</code> and returns a signed URL that allows exactly one upload to exactly one key for a short time. No storage credentials are given to the client.' },
+    { from: 'c', to: 's3', label: 'PUT photo bytes (direct)', note: 'The big upload goes straight to object storage. Your servers don’t carry the bytes. Large files use <b>multipart upload</b>: split into chunks, uploaded in parallel, resumable.' },
+    { from: 's3', to: 'q', label: 'event: object created', note: 'The storage service emits an event. Workers create thumbnails, scan for viruses, transcode video, extract metadata.' },
+    { from: 'q', to: 'api', label: 'mark photo ready', note: 'The DB row becomes <code>ready</code>, with URLs of the processed versions. Downloads are served via a <b>CDN</b> in front of the bucket.' },
+  ]}
+/>
+
+<Callout type="frontend">
+On the frontend this looks like: request the signed URL, then `fetch(url, { method: 'PUT', body: file })` with an upload progress bar. For big files, libraries like Uppy handle multipart and resumable uploads. Now you know what the backend is doing on the other side.
+</Callout>
+
+## Downloads
+
+- **Public content** (product images): bucket behind a **CDN**, with long cache headers.
+- **Private content** (your invoices, private photos): **pre-signed GET URLs** that expire, or CDN signed URLs/cookies.
+
+## Storage tiers and lifecycle
+
+Not all files are equal. A photo is viewed a lot in its first week and rarely after a year. **Lifecycle rules** move objects automatically: hot (standard) → infrequent access → archive (Glacier). Old logs can be deleted after N days. This can cut storage bills by large factors.
+
+<Callout type="interview">
+In any design with media: "Files go to **S3** (object storage); the DB stores only metadata and the object key. Clients upload directly with **pre-signed URLs**, an upload event triggers **async processing** (thumbnails/transcoding), and reads are served through a **CDN**." That one paragraph covers Instagram, YouTube, Dropbox and WhatsApp media.
+</Callout>
+
+<Takeaways>
+- Files → **object storage**; metadata → **database**. Never large blobs in the DB or on app servers' disks.
+- Object storage is **durable, cheap, near-infinite** and HTTP-based.
+- **Pre-signed URLs** let clients upload/download directly; servers stay light.
+- Upload events trigger **async processing**; downloads go through a **CDN**.
+- **Lifecycle tiers** cut costs for old data.
+</Takeaways>
+
+<Quiz
+  id="object-storage"
+  questions={[
+    { q: 'Where should you store users’ uploaded videos?', options: ['In a BLOB column in PostgreSQL', 'On the API server’s local disk', 'In object storage (e.g. S3), with metadata in the DB', 'In Redis'], answer: 2, explain: 'Object storage is built for large files: durable, cheap, CDN-friendly.' },
+    { q: 'What does a pre-signed URL allow?', options: ['Permanent public access to a bucket', 'A client to upload/download one specific object directly, for a limited time', 'Skipping HTTPS', 'Querying files with SQL'], answer: 1, explain: 'It’s a temporary, narrowly scoped permission signed by your server.' },
+    { q: 'Why upload directly to object storage instead of through your API servers?', options: ['It’s required by HTTP', 'Your servers don’t spend CPU/bandwidth copying large files, and scale better', 'It makes files smaller', 'Object storage can’t receive from servers'], answer: 1, explain: 'Moving bytes is expensive; let the storage service do it.' },
+    { q: 'Photos are rarely viewed after a year. How do you reduce cost?', options: ['Delete them', 'Lifecycle rules to move old objects to cheaper storage tiers', 'Compress them to 1 KB', 'Move them to the database'], answer: 1, explain: 'Infrequent-access and archive tiers are much cheaper for cold data.' },
+  ]}
+/>

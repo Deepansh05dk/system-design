@@ -1,0 +1,140 @@
+---
+title: Caching
+slug: caching
+description: The single most effective performance tool. Where to cache, read/write strategies, eviction policies, and the hard part, invalidation.
+module: m2
+order: 3
+minutes: 20
+---
+
+<Callout type="problem">
+Your product page needs 5 database queries and takes 120 ms. It gets 50,000 views per second. The database is melting. But here's the thing: the product details change maybe **twice a day**. Why are we asking the database the same question 50,000 times a second?
+</Callout>
+
+A <Term k="cache">cache</Term> stores a copy of data in a faster place so repeated requests skip the slow work. Remember the latency numbers: memory is ~100× faster than SSD and far faster than a network call plus a database query.
+
+## Caches are everywhere
+
+Caching happens at **every layer** of a request. Each layer that answers stops the request from going deeper:
+
+| Layer | Example | What it caches |
+|---|---|---|
+| Browser | HTTP cache, Service Worker | Images, JS, CSS, API responses (via `Cache-Control`) |
+| CDN | Cloudflare, CloudFront | Static files, sometimes whole pages / API responses |
+| Load balancer / reverse proxy | Nginx, Varnish | Full HTTP responses |
+| Application | In-process memory (LRU map) | Config, hot objects |
+| Distributed cache | <Term k="redis">Redis</Term>, Memcached | DB query results, sessions, computed values |
+| Database | Buffer pool | Hot pages of tables and indexes |
+
+<Callout type="frontend">
+You already do caching on the client: React Query / SWR / Apollo cache API responses, `stale-while-revalidate` shows cached data then refreshes it, and Service Workers cache assets offline. The ideas below (TTL, invalidation, stale data) are the same ones on the server.
+</Callout>
+
+## How caching works
+
+When the data is in the cache it's a <Term k="cache-hit">hit</Term>; when it isn't, it's a **miss**. Play with a small cache:
+
+<CacheSim />
+
+Two important lessons from the simulator:
+1. Real traffic is **skewed**: a few items are very popular (the "80/20 rule"). Even a small cache holding the hot items gets a high hit rate.
+2. **Hit rate is everything.** 95% hit rate vs 80% means 4× fewer requests reaching the database.
+
+## Read strategy: cache-aside (lazy loading)
+
+The most common pattern. The **application** manages the cache:
+
+<ArchFlow
+  title="Cache-aside: read path"
+  height={260}
+  nodes={[
+    { id: 'app', label: 'App server', kind: 'server', x: 140, y: 130 },
+    { id: 'cache', label: 'Redis', sub: 'cache', kind: 'cache', x: 470, y: 50 },
+    { id: 'db', label: 'Database', kind: 'db', x: 470, y: 210 },
+  ]}
+  edges={[
+    { from: 'app', to: 'cache', label: '1. GET product:42' },
+    { from: 'app', to: 'db', label: '2. on miss: SELECT' },
+  ]}
+  steps={[
+    { title: 'Check the cache first', text: 'The app asks Redis for <code>product:42</code>. On a <b>hit</b>, return it. Done in ~1 ms.', add: ['app', 'cache'], flow: ['app>cache', 'cache>app'] },
+    { title: 'On a miss, read the database', text: 'Cache returns nothing. The app queries the database.', add: ['db'], flow: ['app>db', 'db>app'] },
+    { title: 'Store it in the cache for next time', text: 'The app writes the result into Redis with a <b>TTL</b> (e.g. 10 minutes): <code>SET product:42 {...} EX 600</code>. The next reader gets a hit.', flow: ['app>cache'] },
+  ]}
+/>
+
+✅ Only data that's actually requested gets cached. ✅ If the cache dies, the app still works (just slower). ❌ The first request for each item is slow. ❌ Data can be stale until TTL or invalidation.
+
+## Write strategies
+
+What happens to the cache when data **changes**?
+
+| Strategy | How it works | Pros | Cons |
+|---|---|---|---|
+| **Write-through** | Write to cache **and** DB together (synchronously) | Cache always fresh | Every write is slower; caches data that may never be read |
+| **Write-around** | Write to DB only; cache fills on next read (cache-aside) | Doesn't pollute cache with write-once data | Next read is a miss |
+| **Write-back (write-behind)** | Write to cache only; flush to DB later in batches | Very fast writes, absorbs bursts | **Risk of data loss** if the cache dies before flushing |
+| **Invalidate on write** | Write to DB, then **delete** the cache key | Simple, avoids most stale data | Next read is a miss |
+
+<Callout type="why" title="Why delete the key instead of updating it?">
+If two writes race, "update cache" can leave the **older** value in the cache (write A updates DB, write B updates DB, write B updates cache, write A updates cache → cache has A, DB has B). Deleting is idempotent: the next read simply loads the latest value from the DB. "Update DB, then delete cache" is the usual default.
+</Callout>
+
+## Invalidation: the hard part
+
+> "There are only two hard things in Computer Science: cache invalidation and naming things." (Phil Karlton)
+
+A cache is a **copy**. When the original changes, the copy is wrong until it's fixed. See for yourself:
+
+<CacheConsistencySim />
+
+Your tools:
+- <Term k="ttl">**TTL**</Term> (time to live): every entry expires after N seconds. A safety net, always set one. Short TTL = fresher data but more misses.
+- **Explicit invalidation:** delete the key when the data changes (from the code that writes, or from database change events).
+- **Versioned keys:** `product:42:v7`. Change the version and old entries are simply never read again (common for static assets: `app.3f9a2.js`).
+
+Ask per feature: **how stale is acceptable?** A follower count can be 1 minute stale. A stock price, a bank balance or "is this seat available" usually can't be.
+
+## Eviction: when the cache is full
+
+Memory is limited, so caches must **evict** something:
+- <Term k="lru">**LRU**</Term> (least recently used): the most common default. Recently used items are likely to be used again.
+- **LFU** (least frequently used): keeps long-term popular items even if they weren't used in the last minute.
+- **FIFO:** oldest inserted goes first. Simple but usually worse.
+- **TTL-based:** expired items go first.
+
+## What to cache (and what not)
+
+✅ Good candidates: read-heavy data that changes rarely (product details, user profiles, config), expensive computations (recommendations, aggregates), session data, rendered HTML fragments.
+
+❌ Bad candidates: data that changes constantly and must be exact (account balances), data read once and never again, highly personalized data with low reuse (unless per-user caching is the goal).
+
+## Problems to know (we'll solve them later)
+
+- **Cache stampede / thundering herd:** a hot key expires and 10,000 requests miss at the same moment, all hitting the DB. → Module 3, "Hot Keys & Thundering Herd".
+- **Cold start:** after a restart the cache is empty, so the DB gets hammered. → warm the cache gradually.
+- **Cache penetration:** requests for keys that don't exist always miss. → cache "not found" results too, or use a Bloom filter.
+
+<Callout type="interview">
+When you add a cache in a design, answer these 4 questions without being asked: **what** you cache (and the key format), **which strategy** (cache-aside + invalidate on write), **TTL** (and how stale is acceptable), and **eviction** (LRU). Then mention the expected **hit rate** and how much DB load it removes.
+</Callout>
+
+<Takeaways>
+- Caches trade **freshness for speed**. They exist at every layer: browser, CDN, proxy, app, Redis, DB.
+- Default pattern: **cache-aside** reads + **update DB then delete cache key** on writes + a **TTL** safety net.
+- **Write-back** is fastest but risks losing data; **write-through** keeps the cache fresh but slows writes.
+- **LRU** eviction is the usual default. Skewed traffic makes small caches very effective.
+- Always decide **how stale is acceptable** per feature.
+</Takeaways>
+
+<Quiz
+  id="caching"
+  questions={[
+    { q: 'In cache-aside, who is responsible for loading data into the cache on a miss?', options: ['The database', 'The application code', 'The CDN', 'The load balancer'], answer: 1, explain: 'The app checks the cache, reads the DB on a miss, and writes the result to the cache.' },
+    { q: 'Which write strategy risks losing data if the cache server crashes?', options: ['Write-through', 'Write-around', 'Write-back (write-behind)', 'Cache-aside'], answer: 2, explain: 'Write-back acknowledges the write when it’s only in the cache; the DB is updated later.' },
+    { q: 'An admin changes a product price, but users see the old price for an hour. What’s the most likely issue?', options: ['The DB is slow', 'The cache wasn’t invalidated and the TTL is 1 hour', 'LRU eviction', 'Too many replicas'], answer: 1, explain: 'Without invalidation, the stale entry lives until its TTL expires.' },
+    { q: 'Why is “update DB, then delete the cache key” usually preferred over “update DB, then update the cache”?', options: ['Deleting is faster than setting', 'Concurrent updates to the cache can leave an older value; deleting forces a fresh load', 'Redis can’t update keys', 'It avoids TTLs'], answer: 1, explain: 'Racing writers can overwrite the cache out of order. Deletion avoids storing a possibly-old value.' },
+    { q: 'Which data is the WORST candidate for caching?', options: ['Product descriptions', 'User profile pages', 'A bank account balance used to approve withdrawals', 'Country list for a dropdown'], answer: 2, explain: 'It changes often and must be exact at decision time. Read it from the source of truth.' },
+    { q: 'Your cache has a 95% hit rate. If it drops to 80%, roughly how does DB load change?', options: ['Stays the same', 'Goes up ~15%', 'Goes up ~4× (5% → 20% of requests)', 'Goes down'], answer: 2, explain: 'Misses go from 5% to 20% of traffic: four times as many DB queries.' },
+  ]}
+/>

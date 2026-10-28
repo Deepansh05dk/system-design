@@ -1,0 +1,114 @@
+---
+title: Database Replication
+slug: database-replication
+description: Copies of your data on several machines for safety and read scaling. Leader–follower, sync vs async, replication lag and failover.
+module: m2
+order: 5
+minutes: 16
+---
+
+<Callout type="problem">
+Your single database handles all reads and writes. Two problems: (1) reads are 95% of traffic and the DB CPU is maxed, and (2) if the disk dies at 3 AM, **all your data is gone**. One idea solves both: keep **copies**.
+</Callout>
+
+<Term k="replication">Replication</Term> means keeping the same data on multiple machines (**replicas**). It gives you:
+- **Durability:** a disk can die without losing data.
+- **Availability:** if one machine fails, another takes over.
+- **Read scaling:** spread reads across many copies.
+- **Lower latency:** a replica near users in another region.
+
+## Leader–follower (primary–replica)
+
+The most common setup. One <Term k="leader">leader</Term> accepts **all writes**. Followers receive a stream of changes from the leader (usually its write-ahead log) and apply them. Reads can go to any follower.
+
+<ArchFlow
+  title="Leader–follower replication"
+  height={300}
+  nodes={[
+    { id: 'app', label: 'App servers', kind: 'server', x: 110, y: 150 },
+    { id: 'l', label: 'Leader', sub: 'all writes', kind: 'db', icon: '👑', x: 420, y: 70 },
+    { id: 'f1', label: 'Follower 1', sub: 'reads', kind: 'db', x: 720, y: 70 },
+    { id: 'f2', label: 'Follower 2', sub: 'reads', kind: 'db', x: 720, y: 230 },
+  ]}
+  edges={[
+    { from: 'app', to: 'l', label: 'INSERT / UPDATE' },
+    { from: 'l', to: 'f1', label: 'replication log', dashed: true },
+    { from: 'l', to: 'f2', label: 'replication log', dashed: true },
+    { from: 'app', to: 'f2', label: 'SELECT', curve: 40 },
+  ]}
+  steps={[
+    { title: 'Writes go to the leader', text: 'Every INSERT/UPDATE/DELETE goes to one machine, so there’s a single, clear order of changes.', add: ['app', 'l'], flow: ['app>l'] },
+    { title: 'Changes stream to followers', text: 'The leader sends its change log to followers, which replay it to stay in sync.', add: ['f1', 'f2'], flow: ['l>f1', 'l>f2'] },
+    { title: 'Reads are spread across followers', text: 'Read-heavy apps send most SELECTs to followers. Adding followers adds read capacity. Writes still all go to the one leader.', flow: ['app>f2', 'f2>app'] },
+  ]}
+/>
+
+## Sync vs async replication, and replication lag
+
+Write, then read from a follower immediately. Kill the leader right after a write and promote a follower:
+
+<ReplicationSim />
+
+<Versus
+  items={[
+    { name: 'Synchronous', icon: '🔒', pros: ['Leader confirms only after followers have the write', 'No data loss on leader failure'], cons: ['Every write waits for the slowest follower', 'If a follower is down, writes can block'], use: 'When losing a confirmed write is unacceptable (often: 1 sync follower + others async, called “semi-sync”).' },
+    { name: 'Asynchronous', icon: '⚡', pros: ['Writes are fast: leader confirms immediately', 'Followers being slow or down doesn’t block writes'], cons: ['<b>Replication lag</b>: followers can be behind (stale reads)', 'If the leader dies, recent confirmed writes can be lost'], use: 'Most common default, especially for read replicas and cross-region copies.' },
+  ]}
+/>
+
+<Term k="replication-lag">Replication lag</Term> is usually milliseconds, but under heavy load or across regions it can be seconds or more.
+
+### Problems caused by lag (and fixes)
+
+- **Read-your-own-writes:** a user updates their profile, refreshes, and sees the **old** profile (the read hit a lagging follower). Fix: read **the user's own data** from the leader for a short time after they write, or track the last write position and only read from followers that caught up.
+- **Monotonic reads:** a user refreshes and sees a comment, refreshes again and it's gone (different followers, different lag). Fix: route each user to the **same** follower.
+
+<Callout type="frontend">
+You've probably seen read-your-own-writes bugs as a user: you post something, the list refreshes, and your post isn't there. A common frontend workaround is **optimistic UI**: show the user's change locally immediately, don't wait for the server read. It hides lag, but the backend fix above makes it actually correct.
+</Callout>
+
+## Failover
+
+When the leader dies, a follower must be **promoted**:
+1. **Detect** the failure (missed heartbeats, usually a timeout of a few seconds).
+2. **Choose** the most up-to-date follower (often via a consensus system, Module 3).
+3. **Reconfigure** clients to send writes to the new leader.
+
+Dangers:
+- **Lost writes** with async replication (as you saw).
+- **Split brain:** the old leader wasn't dead, just slow. It comes back and **both** think they're the leader, both accepting writes. Systems prevent this with **fencing** (the old leader is forcibly blocked) and **epoch/term numbers**.
+
+Managed databases (AWS RDS/Aurora, Cloud SQL) handle failover for you, typically within a minute or less.
+
+## Other replication topologies
+
+| Topology | How | Good for | Hard part |
+|---|---|---|---|
+| **Leader–follower** | One writer, many readers | Most apps | Write scaling, failover |
+| **Multi-leader** | Several leaders (e.g. one per region) accept writes and sync with each other | Multi-region writes, offline apps | **Write conflicts** (two regions edit the same row) |
+| **Leaderless** | Write to several replicas, read from several, use quorums (Cassandra, DynamoDB) | High availability, no failover needed | Conflict resolution, tunable consistency |
+
+We'll see quorums and conflicts in "Consistency Models" (Module 3).
+
+<Callout type="interview">
+Typical line: "The workload is read-heavy, so I'll add **read replicas** behind the primary. Replication is **async**, so there's some lag; for **read-your-own-writes** (e.g. after editing a profile) we read from the primary. Failover is automatic with a managed database." That covers the usual follow-up questions before they're asked.
+</Callout>
+
+<Takeaways>
+- Replication = copies on several machines: **durability, availability, read scaling**.
+- **Leader–follower**: one writer, many readers. Doesn't scale writes.
+- **Async** = fast writes but **lag** and possible data loss on failover. **Sync** = safe but slower.
+- Handle lag: **read-your-own-writes from the leader**, sticky follower per user.
+- Failover risks: **lost writes** and **split brain**.
+</Takeaways>
+
+<Quiz
+  id="replication"
+  questions={[
+    { q: 'Adding 5 read replicas mostly increases…', options: ['Write throughput', 'Read throughput and availability', 'Storage per machine', 'Write latency'], answer: 1, explain: 'All writes still go to the leader. Replicas add read capacity and redundancy.' },
+    { q: 'A user edits their bio, the page reloads and shows the old bio. What happened?', options: ['Cache stampede', 'The read went to a follower with replication lag', 'Split brain', 'A deadlock'], answer: 1, explain: 'Classic read-your-own-writes violation caused by async replication lag.' },
+    { q: 'With asynchronous replication, what can happen when the leader crashes?', options: ['Nothing is ever lost', 'Recently confirmed writes that hadn’t reached followers may be lost', 'All followers crash too', 'Reads stop working permanently'], answer: 1, explain: 'The leader confirmed them, but they never made it to the follower that got promoted.' },
+    { q: 'What is “split brain”?', options: ['A follower falling behind', 'Two nodes both believing they are the leader and accepting writes', 'A DB with two tables', 'Sharding gone wrong'], answer: 1, explain: 'It happens when an old leader isn’t really dead. Fencing and epoch numbers prevent it.' },
+    { q: 'Which topology lets users in two regions both write locally with low latency?', options: ['Single leader', 'Multi-leader', 'Read replicas only', 'No replication'], answer: 1, explain: 'Each region has a leader. The cost: you must resolve conflicting writes.' },
+  ]}
+/>

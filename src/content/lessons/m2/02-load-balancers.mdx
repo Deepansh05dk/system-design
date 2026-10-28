@@ -1,0 +1,109 @@
+---
+title: Load Balancers
+slug: load-balancers
+description: Spreading traffic across servers. Algorithms, health checks, L4 vs L7, and how to avoid the load balancer becoming a single point of failure.
+module: m2
+order: 2
+minutes: 15
+---
+
+<Callout type="problem">
+You now have 10 stateless app servers. But users only know one address, `api.myapp.com`. **Who decides which server gets each request? What happens when a server crashes at 2 AM?**
+</Callout>
+
+A <Term k="load-balancer">load balancer</Term> (LB) sits in front of your servers. Clients talk only to it; it forwards each request to a healthy server.
+
+It gives you three things:
+1. **Scalability:** add servers behind it without clients noticing.
+2. **Availability:** dead servers are detected and skipped.
+3. **A single place** for TLS termination, rate limiting, logging and routing rules.
+
+## Try the algorithms
+
+Send requests, switch algorithms, kill servers and watch what happens:
+
+<LoadBalancerSim />
+
+## Load balancing algorithms
+
+| Algorithm | How it picks | Good for | Weakness |
+|---|---|---|---|
+| **Round robin** | Each server in turn | Similar servers, similar requests | Ignores how busy a server is |
+| **Weighted round robin** | More turns for bigger servers | Mixed server sizes | Still ignores current load |
+| **Least connections** | Server with fewest active requests | Requests with very different durations | Needs to track connections |
+| **Least response time** | Fastest-responding server | Latency-sensitive apps | More measurement overhead |
+| **IP / key hash** | `hash(client or key) % N` | Stickiness, caches per server | Uneven if few heavy clients; reshuffles when N changes |
+| **Random / power of two choices** | Pick 2 random servers, use the less busy one | Large fleets, simple and very effective | — |
+
+<Callout type="deep" title="Going deeper: power of two choices">
+Picking the least-loaded of **two random** servers gets almost all the benefit of checking every server, without coordinating. It's used by many modern proxies (e.g. Envoy's least-request). A nice detail to drop in an interview.
+</Callout>
+
+## Health checks
+
+The LB regularly sends a <Term k="health-check">health check</Term> (e.g. `GET /health` every 5 seconds) to every server. After a few failures in a row, the server is removed from rotation; after a few successes, it's added back.
+
+Notice in the simulator: between the crash and the next health check, some requests still fail. Real systems shorten this gap with **retries** at the LB and **passive health checks** (marking a server bad as soon as real requests fail).
+
+<Callout type="tip">
+A good `/health` endpoint checks that the app can actually do its job (e.g. reach its database), not just that the process is running. But don't make it so strict that one slow dependency marks **every** server unhealthy at once!
+</Callout>
+
+## L4 vs L7 load balancers (recap)
+
+- **L4 (transport layer):** routes by IP and port. Very fast. Can't see URLs or headers. Example: AWS Network Load Balancer.
+- **L7 (application layer):** reads HTTP. Can route `/api/*` to API servers and `/images/*` to image servers, terminate TLS, add headers, do canary releases ("send 5% of traffic to the new version"). Examples: Nginx, HAProxy, Envoy, AWS Application Load Balancer.
+
+## Who balances the load balancer?
+
+If all traffic goes through one LB, **the LB is a single point of failure**. Solutions:
+
+<ArchFlow
+  title="Redundant load balancing at several levels"
+  height={340}
+  nodes={[
+    { id: 'u', label: 'Users', kind: 'user', x: 90, y: 170 },
+    { id: 'dns', label: 'DNS / GeoDNS', sub: 'picks a region', kind: 'dns', x: 270, y: 170 },
+    { id: 'lb1', label: 'LB (active)', sub: 'region 1', kind: 'lb', x: 480, y: 90 },
+    { id: 'lb2', label: 'LB (standby)', sub: 'shares a virtual IP', kind: 'lb', x: 480, y: 250 },
+    { id: 's1', label: 'App servers', sub: 'zone A', kind: 'server', x: 740, y: 90 },
+    { id: 's2', label: 'App servers', sub: 'zone B', kind: 'server', x: 740, y: 250 },
+  ]}
+  edges={[
+    { from: 'u', to: 'dns' },
+    { from: 'dns', to: 'lb1' },
+    { from: 'dns', to: 'lb2', dashed: true },
+    { from: 'lb1', to: 's1' },
+    { from: 'lb1', to: 's2' },
+    { from: 'lb2', to: 's1', dashed: true },
+    { from: 'lb2', to: 's2', dashed: true },
+    { from: 'lb1', to: 'lb2', label: 'heartbeat', dashed: true, bidir: true },
+  ]}
+/>
+
+- **Active–passive pair:** two LBs share a floating "virtual IP"; if the active one stops sending heartbeats, the standby takes over the IP within seconds.
+- **Managed cloud LBs** (AWS ALB/NLB, Google Cloud LB) are already distributed and redundant across zones. In interviews it's fine to say "a managed, highly available load balancer".
+- **DNS / GeoDNS** in front spreads users across **regions**, each with its own LBs.
+
+<Callout type="interview">
+Draw the LB in almost every design between clients and app servers. Say: "an **L7 load balancer**, **least connections**, with **health checks**; it's managed and redundant across availability zones, and it terminates TLS." Then move on. Don't spend 10 minutes here unless asked.
+</Callout>
+
+<Takeaways>
+- A load balancer spreads requests, **skips unhealthy servers** and lets you scale out invisibly.
+- Algorithms: **round robin** (simple), **least connections** (uneven request times), **hash** (stickiness).
+- **Health checks** detect dead servers; there's a short gap before detection.
+- **L7** LBs understand HTTP and can route by path or header; **L4** LBs are faster but blind to content.
+- Make the LB itself redundant: **active–passive pairs, managed cloud LBs, DNS across regions**.
+</Takeaways>
+
+<Quiz
+  id="load-balancers"
+  questions={[
+    { q: 'Some requests take 20 ms and some take 5 s (report generation). Which algorithm handles this best?', options: ['Round robin', 'Least connections', 'IP hash', 'Random'], answer: 1, explain: 'Least connections avoids piling new requests onto servers stuck on slow work.' },
+    { q: 'A server crashes. Why do a few requests still fail right after?', options: ['The LB is broken', 'The LB hasn’t run a failing health check yet', 'DNS still points to it', 'TLS needs to reconnect'], answer: 1, explain: 'Until health checks detect the failure, the LB still routes some traffic there. Retries help cover the gap.' },
+    { q: 'You want /api/* to go to API servers and /static/* to file servers. You need…', options: ['An L4 load balancer', 'An L7 load balancer', 'Round robin DNS', 'Sticky sessions'], answer: 1, explain: 'Only L7 understands HTTP paths.' },
+    { q: 'How do you avoid the load balancer being a single point of failure?', options: ['Use a bigger LB machine', 'Run redundant LBs (active–passive with a virtual IP, or a managed multi-zone LB)', 'Remove health checks', 'Use UDP'], answer: 1, explain: 'Redundancy is the answer to every single point of failure.' },
+    { q: 'What does IP-hash load balancing give you?', options: ['Perfectly even load', 'The same client tends to reach the same server', 'Faster TLS', 'Automatic failover'], answer: 1, explain: 'hash(client IP) % N maps each client to a consistent server (until N changes).' },
+  ]}
+/>

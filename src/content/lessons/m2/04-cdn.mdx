@@ -1,0 +1,107 @@
+---
+title: Content Delivery Networks (CDN)
+slug: cdn
+description: Why Netflix loads fast in India even though it's an American company. Edge servers, push vs pull, cache headers and what CDNs do beyond static files.
+module: m2
+order: 4
+minutes: 12
+---
+
+<Callout type="problem">
+Your servers are in Virginia, USA. A user in Mumbai loads your homepage: HTML, 30 images, 5 JS files, fonts. Every file needs a round trip of ~220 ms across the planet, and the first ones also pay for TCP and TLS handshakes. The page takes 4 seconds. **You can't make light faster. What can you do?**
+</Callout>
+
+You bring the content closer to the user. A <Term k="cdn">CDN</Term> is a network of servers in hundreds of cities (<Term k="edge-location">edge locations</Term> or PoPs, "points of presence") that keep copies of your content near users.
+
+## See the difference
+
+<CdnSim />
+
+Notice:
+- The **first** request from a city is a **miss**: the edge fetches from your origin server, then caches it.
+- Later requests from that city are **hits**, served from a few kilometres away.
+- Your origin barely gets any traffic. The CDN absorbs most of it.
+
+## How a CDN request works
+
+<ArchFlow
+  title="Request through a CDN"
+  height={300}
+  nodes={[
+    { id: 'u', label: 'User in Mumbai', kind: 'user', x: 100, y: 150 },
+    { id: 'dns', label: 'CDN DNS', sub: 'nearest edge?', kind: 'dns', x: 300, y: 50 },
+    { id: 'edge', label: 'Edge: Mumbai', sub: 'cache', kind: 'cdn', x: 420, y: 200 },
+    { id: 'shield', label: 'Regional / shield', sub: 'optional middle tier', kind: 'cdn', x: 620, y: 200 },
+    { id: 'origin', label: 'Origin', sub: 'your servers / S3 (US)', kind: 'server', x: 820, y: 120 },
+  ]}
+  edges={[
+    { from: 'u', to: 'dns', label: 'cdn.myapp.com?' },
+    { from: 'u', to: 'edge', label: 'GET /hero.jpg' },
+    { from: 'edge', to: 'shield', label: 'miss' },
+    { from: 'shield', to: 'origin', label: 'miss' },
+  ]}
+  steps={[
+    { title: 'DNS sends the user to the nearest edge', text: 'The CDN’s DNS (or anycast routing) returns the IP of the closest healthy edge location.', add: ['u', 'dns'], flow: ['u>dns', 'dns>u'] },
+    { title: 'Edge cache hit (the common case)', text: 'The edge has <code>/hero.jpg</code> cached. It responds in a few milliseconds. The origin never sees this request.', add: ['edge'], flow: ['u>edge', 'edge>u'] },
+    { title: 'Edge miss → origin pull', text: 'If the edge doesn’t have it (first request, or expired), it fetches from the origin, often through a regional “shield” cache so that 200 edges don’t all hammer the origin at once. Then it caches the file according to its <code>Cache-Control</code> headers.', add: ['shield', 'origin'], flow: ['edge>shield', 'shield>origin', 'origin>shield', 'shield>edge'] },
+  ]}
+/>
+
+## Push vs pull CDNs
+
+<Versus
+  items={[
+    { name: 'Pull (most common)', icon: '🧲', pros: ['Edges fetch from origin on first request', 'Zero effort: just point the CDN at your origin', 'Only popular content uses edge space'], cons: ['First user in each region gets a slow miss'], use: 'Websites, images, JS/CSS, most cases.' },
+    { name: 'Push', icon: '📤', pros: ['You upload content to the CDN ahead of time', 'No first-request miss', 'Full control over what is stored'], cons: ['You manage uploads and updates', 'Pays for storing content even if never requested'], use: 'Large files with known demand: video releases, game patches, software downloads.' },
+  ]}
+/>
+
+## Controlling what the CDN caches
+
+The CDN obeys your HTTP headers (from the HTTP lesson):
+
+```http
+# Fingerprinted static assets: cache "forever"
+Cache-Control: public, max-age=31536000, immutable      → app.3f9a2c.js
+
+# HTML: always check for a new version
+Cache-Control: no-cache                                  → index.html
+
+# API response shared by everyone: cache at the CDN for 60 s
+Cache-Control: public, s-maxage=60, stale-while-revalidate=30
+```
+
+**Invalidation:** when you deploy, either (1) use **fingerprinted filenames** (`app.3f9a2c.js`), so new content = new URL, nothing to purge, or (2) send a **purge** request to the CDN for changed paths. Fingerprinting is the clean solution.
+
+<Callout type="frontend">
+This is exactly what Vite/Webpack do with hashed filenames, and why `index.html` must not be cached long. Your build tooling is already designed around CDNs. Vercel and Netlify are essentially a CDN + build system.
+</Callout>
+
+## What CDNs do beyond static files
+
+- **Video streaming:** Netflix's Open Connect and YouTube's caches sit inside ISPs' networks.
+- **Dynamic acceleration:** even uncacheable API calls get faster because the user's TLS connection ends at a nearby edge, and the edge has a warm, optimized connection back to the origin.
+- **Security:** DDoS absorption, Web Application Firewall (WAF), bot protection. Attack traffic hits hundreds of edges instead of your servers.
+- **Edge compute:** run small functions at the edge (Cloudflare Workers, Vercel Edge Functions) for redirects, A/B tests, auth checks, personalization.
+- **Image optimization:** resize and convert to WebP/AVIF on the fly per device.
+
+<Callout type="interview">
+Any design with images, video or a global audience should have a CDN. Say: "Static assets and media are served through a **CDN** with long cache TTLs and fingerprinted URLs; the origin is S3. This removes most bandwidth from our servers and cuts latency for global users." For video designs (YouTube/Netflix), the CDN is the **most important** component.
+</Callout>
+
+<Takeaways>
+- CDNs put copies of content **near users** to beat the speed of light, and **offload** your origin.
+- **Pull** CDNs fetch on first miss (most common); **push** CDNs are pre-loaded.
+- Control caching with **Cache-Control** headers; use **fingerprinted filenames** to avoid invalidation problems.
+- Modern CDNs also provide **DDoS protection, TLS termination near users, edge compute and image optimization**.
+</Takeaways>
+
+<Quiz
+  id="cdn"
+  questions={[
+    { q: 'Why is the first request for a file from a new city slower, even with a CDN?', options: ['The CDN is broken', 'It’s a cache miss; the edge must fetch from the origin first', 'DNS is slow', 'HTTPS is disabled'], answer: 1, explain: 'Pull CDNs fill their cache on demand. The first request pays for the trip to the origin.' },
+    { q: 'You deploy a new version of app.js but users keep getting the old one from the CDN. Best long-term fix?', options: ['Set max-age=0 on everything', 'Use fingerprinted filenames (app.3f9a2.js) so each version has a new URL', 'Turn off the CDN', 'Ask users to clear cache'], answer: 1, explain: 'A new URL can’t be stale. Old and new versions simply live side by side.' },
+    { q: 'When would a push CDN make more sense than pull?', options: ['A blog with random traffic', 'A big game patch everyone will download at release time', 'User avatars', 'API responses'], answer: 1, explain: 'Known, huge, simultaneous demand: pre-load it so the origin isn’t crushed at launch.' },
+    { q: 'How can a CDN speed up a request that cannot be cached (e.g. a personalized API call)?', options: ['It can’t', 'TLS/TCP handshakes happen with a nearby edge, which has a warm, optimized connection to the origin', 'It caches it anyway', 'It switches to UDP'], answer: 1, explain: 'Short handshakes near the user + persistent backbone connections reduce total latency.' },
+  ]}
+/>

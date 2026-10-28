@@ -1,0 +1,75 @@
+---
+title: Consistent Hashing
+slug: consistent-hashing
+description: The clever trick that lets caches and databases add or remove servers while moving only a small fraction of keys.
+module: m2
+order: 7
+minutes: 13
+---
+
+<Callout type="problem">
+You have 4 cache servers and use `server = hash(key) % 4`. Traffic grows, you add a 5th server. Now it's `hash(key) % 5`, and **about 80% of keys map to a different server**. Almost the whole cache misses at once, and the database is flooded. Same story when a server dies. **Can we add or remove a server and only move the keys that really need to move?**
+</Callout>
+
+## Why mod N breaks
+
+With `hash(key) % N`, the result depends on N. Change N and nearly every key's answer changes. With N → N+1, roughly **N/(N+1)** of keys move. That's 80% for 4 → 5 servers.
+
+Ideally, when going from N to N+1 servers, only **1/(N+1)** of the keys should move (just enough to fill the new server).
+
+## The ring
+
+<Term k="consistent-hashing">Consistent hashing</Term> puts **both servers and keys** on the same circle of hash values (imagine 0 to 2³² wrapped into a ring):
+
+1. Hash each **server** (by name or IP) to a position on the ring.
+2. Hash each **key** to a position on the ring.
+3. A key belongs to the **first server clockwise** from it.
+
+When a server is **added**, it only takes the keys between itself and the previous server counter-clockwise. When a server is **removed**, only its keys move, to the next server clockwise. Everything else stays put.
+
+<HashRing />
+
+## Virtual nodes: fixing uneven slices
+
+With just one point per server, the gaps on the ring are random, so one server might own 50% of the ring and another 10% (you probably saw this with 1 virtual node). Also, when a server dies, **all** its load goes to **one** neighbour.
+
+The fix: **virtual nodes (vnodes)**. Each physical server is placed on the ring **many times** (e.g. 100–200 points, `serverA#1`, `serverA#2`, ...). Results:
+- Load evens out (law of large numbers).
+- When a server dies, its many small slices are spread across **many** other servers.
+- Bigger machines can get more vnodes, so they take more load.
+
+## Where it's used
+
+- **Distributed caches:** Memcached clients, Redis Cluster-like setups (Redis Cluster actually uses a related idea: 16,384 fixed **hash slots** assigned to nodes).
+- **Databases:** Amazon DynamoDB, Apache Cassandra, Riak.
+- **Load balancers & CDNs:** routing the same key/URL to the same backend to maximize cache hits.
+- **Sharded storage** in general: object stores, message partitions.
+
+<Callout type="deep" title="Going deeper: replication on the ring">
+Cassandra and DynamoDB store each key on the **next N distinct servers** clockwise (e.g. N = 3). That gives replication "for free" from the same ring: if one server is down, the key is still on the next two.
+</Callout>
+
+<Callout type="analogy">
+Think of a round table with seats (keys) and waiters (servers) standing at points around it. Each seat is served by the next waiter clockwise. If a new waiter joins, they only take over the seats between them and the previous waiter. Nobody else's seats change.
+</Callout>
+
+<Callout type="interview">
+Mention consistent hashing whenever you: shard a cache or DB that will grow, design a distributed cache / key-value store, or need "the same key always goes to the same server" with servers coming and going. Say: "**consistent hashing with virtual nodes**, so adding a node moves only ~1/N of keys and load stays even." In the Key-Value Store design (Module 7), it's the core.
+</Callout>
+
+<Takeaways>
+- `hash % N` remaps **most** keys when N changes → mass cache misses / data movement.
+- Consistent hashing places **keys and servers on a ring**; a key goes to the **next server clockwise**.
+- Adding/removing a server moves only about **1/N** of keys.
+- **Virtual nodes** balance load and spread a failed server's keys across many servers.
+</Takeaways>
+
+<Quiz
+  id="consistent-hashing"
+  questions={[
+    { q: 'With hash(key) % N, going from 4 to 5 servers moves roughly what share of keys?', options: ['~20%', '~50%', '~80%', '0%'], answer: 2, explain: 'Most keys get a different remainder. About N/(N+1) = 4/5 move.' },
+    { q: 'On a consistent hashing ring, which server owns a key?', options: ['The closest server in either direction', 'The first server clockwise from the key', 'A random server', 'The server with the least load'], answer: 1, explain: 'By convention, walk clockwise from the key’s position until you hit a server.' },
+    { q: 'What problem do virtual nodes solve?', options: ['Network latency', 'Uneven load and dumping a failed server’s entire load on one neighbour', 'Data encryption', 'Replication lag'], answer: 1, explain: 'Many points per server give even slices, and failures spread across many servers.' },
+    { q: 'A server is removed from the ring. Which keys move?', options: ['All keys', 'Only the keys that server owned; they go to the next server(s) clockwise', 'Half the keys', 'None'], answer: 1, explain: 'Everything else keeps its owner. That is the whole point.' },
+  ]}
+/>

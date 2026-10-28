@@ -809,3 +809,358 @@ table.sim-table tr.bad td {
   padding: 0.25rem 0;
   font-size: 0.9rem;
 }
+
+/* ---------- ScalingSim ---------- */
+.sc-server {
+  margin: 0.4rem 0;
+}
+.sc-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.sc-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-height: 30px;
+  align-items: center;
+}
+.sc-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  transition: background 0.3s;
+}
+
+/* ---------- LoadBalancerSim ---------- */
+.lb-stage {
+  display: grid;
+  grid-template-columns: 110px 120px 1fr;
+  gap: 0.8rem;
+  align-items: center;
+}
+.lb-users {
+  display: grid;
+  gap: 4px;
+}
+.lb-user {
+  font-size: 0.75rem;
+  font-weight: 700;
+  border: 1.5px solid;
+  border-radius: 8px;
+  padding: 2px 6px;
+  background: var(--surface);
+}
+.lb-box {
+  text-align: center;
+  font-weight: 700;
+  font-size: 0.85rem;
+  padding: 1rem 0.4rem;
+  border-radius: 12px;
+  border: 2px solid var(--k-lb);
+  background: color-mix(in srgb, var(--k-lb) 10%, var(--surface));
+}
+.lb-servers {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 0.5rem;
+}
+.lb-server {
+  border: 1.5px solid var(--k-server);
+  border-radius: 10px;
+  padding: 0.5rem;
+  background: var(--surface);
+  font-size: 0.82rem;
+  transition: opacity 0.3s;
+}
+.lb-server.dead {
+  border-color: var(--bad);
+  background: var(--bad-soft);
+}
+.lb-server.out {
+  opacity: 0.55;
+}
+.lb-srv-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.lb-slots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  min-height: 34px;
+  margin: 4px 0;
+  align-content: flex-start;
+}
+.lb-req {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  animation: pop 0.3s ease-out;
+}
+@media (max-width: 640px) {
+  .lb-stage {
+    grid-template-columns: 1fr;
+  }
+  .lb-users {
+    grid-template-columns: repeat(5, 1fr);
+  }
+}
+
+/* ---------- CacheSim ---------- */
+.cache-stage {
+  display: flex;
+  gap: 0.6rem;
+  align-items: stretch;
+}
+.cache-arrow {
+  align-self: center;
+  font-size: 1.4rem;
+  color: var(--text-faint);
+}
+.cache-db {
+  width: 160px;
+}
+.cache-chip {
+  height: 46px;
+  min-width: 56px;
+  flex-direction: column;
+  gap: 0;
+  font-size: 1rem;
+}
+.cache-chip small {
+  font-size: 0.62rem;
+  font-weight: 500;
+  opacity: 0.8;
+}
+.cc-val {
+  font-size: 1.6rem;
+  font-weight: 800;
+}
+.cc-stale {
+  border-color: var(--bad);
+  background: var(--bad-soft);
+}
+@media (max-width: 640px) {
+  .cache-stage {
+    flex-direction: column;
+  }
+  .cache-db {
+    width: auto;
+  }
+  .cache-arrow {
+    transform: rotate(90deg);
+  }
+}
+
+/* ---------- CdnSim ---------- */
+.cdn-results {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.4rem 0;
+  min-height: 40px;
+}
+.cdn-row {
+  display: grid;
+  grid-template-columns: 80px 1fr 64px;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.85rem;
+}
+.cdn-note {
+  grid-column: 2 / -1;
+  margin-top: -4px;
+}
+.cdn-bar-wrap {
+  height: 12px;
+  background: var(--surface-2);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.cdn-bar {
+  height: 100%;
+  border-radius: 99px;
+}
+.cdn-ms {
+  font-family: var(--mono);
+  font-weight: 700;
+  text-align: right;
+}
+
+/* ---------- ReplicationSim ---------- */
+.rep-nodes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.6rem;
+}
+.rep-node {
+  border: 2px solid var(--k-db);
+  border-radius: 12px;
+  padding: 0.6rem;
+  background: var(--surface);
+}
+.rep-node.leader {
+  border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, var(--surface));
+}
+.rep-node.dead {
+  border-color: var(--bad);
+  background: var(--bad-soft);
+  opacity: 0.7;
+}
+.rep-head {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 0.88rem;
+}
+.rep-val {
+  font-size: 1.6rem;
+  font-weight: 800;
+  font-family: var(--mono);
+}
+@media (max-width: 640px) {
+  .rep-nodes {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- ShardingSim ---------- */
+.shard-grid {
+  display: grid;
+  gap: 0.5rem;
+}
+.shard {
+  border: 1.5px solid var(--k-db);
+  border-radius: 10px;
+  padding: 0.5rem;
+  background: var(--surface);
+  min-width: 0;
+}
+.shard.hot {
+  border-color: var(--bad);
+  background: var(--bad-soft);
+}
+.shard-head {
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+.shard-users {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 6px;
+}
+@media (max-width: 640px) {
+  .shard-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+}
+
+/* ---------- HashRing ---------- */
+.ring-wrap {
+  display: grid;
+  grid-template-columns: minmax(240px, 340px) 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+.ring-svg {
+  width: 100%;
+  height: auto;
+}
+.ring-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.3rem 0.6rem;
+  margin-bottom: 4px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.ring-legend:hover {
+  border-color: var(--bad);
+}
+.ring-legend i {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+}
+@media (max-width: 640px) {
+  .ring-wrap {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- QueueSim ---------- */
+.q-stage {
+  display: grid;
+  grid-template-columns: 110px 1fr 120px;
+  gap: 0.6rem;
+  align-items: center;
+}
+.q-producer {
+  text-align: center;
+  font-weight: 700;
+  font-size: 0.85rem;
+  border: 2px solid var(--k-server);
+  border-radius: 12px;
+  padding: 0.7rem 0.3rem;
+}
+.q-queue {
+  border: 2px dashed var(--k-queue);
+  border-radius: 12px;
+  padding: 0.5rem;
+  min-height: 90px;
+}
+.q-msgs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.q-msg {
+  width: 12px;
+  height: 16px;
+  border-radius: 3px;
+  background: var(--k-queue);
+  animation: pop 0.25s ease-out;
+}
+.q-msg.retry {
+  background: var(--bad);
+}
+.q-workers {
+  display: grid;
+  gap: 4px;
+}
+.q-worker {
+  font-size: 0.78rem;
+  font-weight: 700;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 3px 8px;
+  background: var(--surface);
+}
+.q-worker.busy {
+  border-color: var(--good);
+  background: var(--good-soft);
+}
+.q-worker.dead {
+  border-color: var(--bad);
+  background: var(--bad-soft);
+}
+@media (max-width: 640px) {
+  .q-stage {
+    grid-template-columns: 1fr;
+  }
+  .q-workers {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}

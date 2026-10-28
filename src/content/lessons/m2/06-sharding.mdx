@@ -1,0 +1,89 @@
+---
+title: Sharding & Partitioning
+slug: sharding-and-partitioning
+description: When data or writes outgrow one machine, split them. Shard keys, strategies, hot spots and what you lose by sharding.
+module: m2
+order: 6
+minutes: 16
+---
+
+<Callout type="problem">
+Replicas solved reads. But now you have 20 TB of data and 50,000 **writes** per second. Every write still goes to the single leader, and the data doesn't fit on one machine. Copies don't help: each copy has **all** the data and the leader handles **all** the writes. **You need to split the data itself.**
+</Callout>
+
+<Term k="sharding">Sharding</Term> (also called horizontal partitioning) splits one big dataset into smaller pieces (**shards**), each stored on a different database server. Each shard holds a **subset of rows**, and together they hold everything.
+
+- Users A–M on shard 1, N–Z on shard 2.
+- Each shard handles only its own reads **and writes** → write capacity grows with the number of shards.
+- Each shard is usually **also replicated** for safety. Sharding and replication work together.
+
+<Callout type="info" title="Partitioning vs sharding">
+**Partitioning** is the general idea of splitting a table. When the partitions live on **different machines**, it's usually called **sharding**. **Vertical partitioning** means splitting **columns** (e.g. move big `bio` and `avatar` columns to another table). This lesson is about horizontal: splitting **rows**.
+</Callout>
+
+## Choosing a shard key
+
+The <Term k="shard-key">shard key</Term> decides where each row lives. It's the most important sharding decision and is hard to change later. Try the strategies:
+
+<ShardingSim />
+
+## Sharding strategies
+
+| Strategy | How | Pros | Cons |
+|---|---|---|---|
+| **Range** | Key ranges: A–H, I–P, Q–Z or dates | Range queries stay on one shard; easy to reason about | **Uneven**; new data piles on the "latest" shard (time-based keys) |
+| **Hash** | `hash(key) % N` | Even distribution | Range queries hit all shards; changing N moves most keys |
+| **Consistent hashing** | Keys and servers on a hash ring | Even + adding a shard moves only ~1/N of keys | Slightly more complex (next lesson) |
+| **Directory / lookup** | A service stores key → shard | Fully flexible, can move hot keys | Extra lookup, directory must be highly available |
+| **Geo** | By user region | Data near users, data-residency laws | Uneven regions |
+
+## What makes a good shard key?
+
+1. **High cardinality:** many distinct values (`user_id` ✅, `country` ❌ only ~200 values, `is_active` ❌ 2 values).
+2. **Even distribution** of data **and** traffic.
+3. **Matches the main queries:** most queries should hit **one shard**. If you shard orders by `user_id`, "all orders of user 7" is one shard. "All orders today" must ask every shard.
+4. **Avoids hotspots:** a monotonically increasing key (timestamp, auto-increment ID) with range sharding sends **all new writes to the last shard**.
+
+## Hotspots: the celebrity problem
+
+Even with perfect hashing, **one key can be hot**. If you shard tweets by `user_id`, a celebrity with 100M followers makes one shard melt while others idle. A <Term k="hotspot">hotspot</Term>. Fixes:
+- **Cache** the hot data aggressively.
+- **Add a suffix** to split one hot key across several shards (`celebrity_id#1 ... #10`), then gather on read.
+- **Dedicated shard** for known heavy hitters (with directory-based sharding).
+
+## What you lose by sharding
+
+Sharding is powerful but expensive in complexity. Don't do it before you need to.
+
+- **Cross-shard queries** (scatter-gather): "top 10 products across all users" must ask every shard and merge.
+- **Cross-shard JOINs** are slow or impossible; you denormalize instead.
+- **Cross-shard transactions** need distributed transactions (2PC/Sagas, Module 3).
+- **Unique constraints and auto-increment IDs** across shards need a global ID generator (Module 3).
+- **Rebalancing:** moving data when adding shards, without downtime.
+- **Operations:** backups, schema changes and monitoring × N.
+
+<Callout type="why" title="Why not shard from day one?">
+Most products never need it. A single well-tuned PostgreSQL server with read replicas can handle many thousands of writes per second and terabytes of data. The usual order: **optimize queries & indexes → cache → read replicas → vertical scaling → partition big tables → shard**. Interviewers like it when you shard **because the numbers demand it**, not by reflex.
+</Callout>
+
+<Callout type="interview">
+When you shard in an interview, state three things: **(1) the shard key and why** ("`user_id`: high cardinality, and most queries are per-user"), **(2) the strategy** ("consistent hashing so we can add shards"), **(3) the trade-off** ("global queries like 'trending' become scatter-gather, so we compute them separately in a batch job").
+</Callout>
+
+<Takeaways>
+- **Sharding** splits rows across machines → scales **writes and storage**. Usually combined with replication.
+- The **shard key** decides everything: high cardinality, even load, matches main queries, no monotonic hot spots.
+- **Range** is good for ranges but uneven; **hash** is even but bad for ranges; **consistent hashing** eases rebalancing.
+- Costs: **cross-shard queries, joins, transactions, global IDs, rebalancing**. Shard only when numbers demand it.
+</Takeaways>
+
+<Quiz
+  id="sharding"
+  questions={[
+    { q: 'Which problem does sharding solve that read replicas do NOT?', options: ['Read scaling', 'Write scaling and data too big for one machine', 'Availability', 'Faster JOINs'], answer: 1, explain: 'Replicas copy everything and all writes still go to one leader. Shards split both data and writes.' },
+    { q: 'Which is the worst shard key for a users table with 500M users?', options: ['user_id', 'hash(email)', 'country', 'hash(user_id)'], answer: 2, explain: 'Low cardinality and very uneven: one country could hold a huge share of users.' },
+    { q: 'You range-shard an events table by created_at. What problem appears?', options: ['Range queries become slow', 'All new writes go to the newest shard (a write hotspot)', 'Too many shards', 'Joins become faster'], answer: 1, explain: 'Monotonically increasing keys with range sharding concentrate current writes on one shard.' },
+    { q: 'Orders are sharded by user_id. Which query becomes expensive?', options: ['All orders of user 42', 'Order #991 of user 42', 'Total revenue across all users today', 'Latest order of user 42'], answer: 2, explain: 'It needs data from every shard (scatter-gather) and a merge.' },
+    { q: 'A celebrity’s data overloads one shard. Which fix is reasonable?', options: ['Remove the celebrity', 'Cache their data heavily and/or split their key across several shards', 'Switch to range sharding', 'Add an index'], answer: 1, explain: 'Hot keys need caching, key splitting, or dedicated resources.' },
+  ]}
+/>

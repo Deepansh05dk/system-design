@@ -1,0 +1,128 @@
+---
+title: Message Queues & Pub/Sub
+slug: message-queues-and-pub-sub
+description: Do the slow work later. Queues, Kafka, delivery guarantees, dead-letter queues, and why async makes systems sturdier.
+module: m2
+order: 8
+minutes: 18
+---
+
+<Callout type="problem">
+When a user uploads a video, your API must: save the file, transcode it to 5 resolutions (10 minutes!), generate thumbnails, update the search index, and notify 2 million subscribers. If the API does all this before responding, the user stares at a spinner for 10 minutes, and if any step fails, the whole upload fails. **What if the API just said "Got it!" and the work happened in the background?**
+</Callout>
+
+## The idea: decouple with a queue
+
+A <Term k="queue">message queue</Term> is a buffer between the code that **creates** work (**producers**) and the code that **does** work (**consumers / workers**):
+
+1. The API puts a message in the queue: `{ "type": "video_uploaded", "videoId": 991 }`.
+2. It immediately responds to the user: "Upload received, processing…".
+3. Workers pull messages from the queue and do the heavy work at their own pace.
+
+Experiment with traffic spikes, slow jobs, failures and worker crashes:
+
+<QueueSim />
+
+## What queues give you
+
+- **Faster responses:** users don't wait for slow work.
+- **Load leveling:** a spike of 10,000 jobs/sec doesn't crash workers; the queue absorbs it and workers drain it steadily.
+- **Decoupling:** the producer doesn't know or care who consumes. Add a new consumer (e.g. analytics) without touching the producer.
+- **Reliability:** if a worker crashes, the unacknowledged message goes back to the queue and another worker picks it up.
+- **Independent scaling:** scale workers based on queue length.
+
+<Callout type="analogy">
+A restaurant. Waiters (API servers) take orders and pin tickets on a rail (the queue). Cooks (workers) take tickets when they're free. A rush of customers doesn't make the waiters cook; tickets just pile up a bit and the kitchen catches up. Hire more cooks if the rail is always full.
+</Callout>
+
+## Point-to-point queue vs pub/sub
+
+<ArchFlow
+  title="Work queue vs publish/subscribe"
+  height={360}
+  nodes={[
+    { id: 'p', label: 'Upload API', sub: 'producer', kind: 'server', x: 110, y: 90 },
+    { id: 'q', label: 'Work queue', sub: 'transcode jobs', kind: 'queue', x: 380, y: 90 },
+    { id: 'w1', label: 'Worker 1', kind: 'worker', x: 640, y: 40 },
+    { id: 'w2', label: 'Worker 2', kind: 'worker', x: 640, y: 140 },
+    { id: 'p2', label: 'Order service', sub: 'publisher', kind: 'server', x: 110, y: 270 },
+    { id: 't', label: 'Topic: order_placed', kind: 'queue', icon: '📢', x: 380, y: 270 },
+    { id: 'c1', label: 'Email service', kind: 'service', x: 640, y: 230 },
+    { id: 'c2', label: 'Inventory service', kind: 'service', x: 820, y: 290 },
+    { id: 'c3', label: 'Analytics', kind: 'service', x: 640, y: 330 },
+  ]}
+  edges={[
+    { from: 'p', to: 'q' },
+    { from: 'q', to: 'w1' },
+    { from: 'q', to: 'w2' },
+    { from: 'p2', to: 't' },
+    { from: 't', to: 'c1' },
+    { from: 't', to: 'c2' },
+    { from: 't', to: 'c3' },
+  ]}
+  steps={[
+    { title: 'Work queue (point-to-point)', text: 'Each message is processed by <b>exactly one</b> of the workers. Workers compete for jobs. Add workers to go faster. Examples: RabbitMQ queues, Amazon SQS.', add: ['p', 'q', 'w1', 'w2'], flow: ['p>q', 'q>w1'] },
+    { title: 'Another message, another worker', text: 'The next job goes to whichever worker is free. The work is <b>divided</b>.', flow: ['p>q', 'q>w2'] },
+    { title: 'Pub/Sub (fan-out)', text: 'With <b>publish/subscribe</b>, a message is published to a <b>topic</b>, and <b>every subscriber gets its own copy</b>. One “order placed” event triggers email, inventory and analytics independently. Examples: Kafka topics, Google Pub/Sub, Amazon SNS.', add: ['p2', 't', 'c1', 'c2', 'c3'], flow: ['p2>t', 't>c1', 't>c2', 't>c3'] },
+  ]}
+/>
+
+## Kafka: the log that everyone uses
+
+<Term k="kafka">Apache Kafka</Term> is not a classic queue. It's a **distributed, append-only log**:
+
+- Messages are **appended** to a topic and **kept** for days (or forever), not deleted when read.
+- A topic is split into **partitions** for parallelism. Messages with the same **key** (e.g. `user_id`) always go to the same partition, so their **order is preserved**.
+- Each consumer group tracks its own **offset** (position in the log). Different groups read independently; a new consumer can even **replay** history from the start.
+- Very high throughput (millions of messages/sec across a cluster), because it writes sequentially to disk.
+
+<Versus
+  items={[
+    { name: 'Classic queue (RabbitMQ, SQS)', icon: '📬', pros: ['Message deleted once acknowledged', 'Per-message routing, priorities, delays', 'Simple work distribution'], cons: ['No replay of old messages', 'Lower throughput at extreme scale'], use: 'Background jobs, task distribution: send email, resize image, process payment.' },
+    { name: 'Log (Kafka, Kinesis, Pulsar)', icon: '📜', pros: ['Retains messages; consumers can replay', 'Ordering per partition (key)', 'Huge throughput; many independent consumer groups'], cons: ['More to operate', 'Parallelism limited by number of partitions'], use: 'Event streaming: activity events, change data capture, logs, metrics, feeding many downstream systems.' },
+  ]}
+/>
+
+## Delivery guarantees
+
+| Guarantee | Meaning | Risk |
+|---|---|---|
+| **At most once** | Delivered 0 or 1 times | Messages can be lost |
+| **At least once** | Delivered 1 or more times | **Duplicates** possible (most common default) |
+| **Exactly once** | Effectively processed once | Hard; needs special support plus idempotent consumers |
+
+At-least-once happens because: a worker processes a message, then crashes **before acknowledging** it. The queue gives the message to another worker, so it's processed twice. That's why consumers should be <Term k="idempotent">**idempotent**</Term>: processing the same message twice has the same effect as once (e.g. "set status = shipped" instead of "add ₹100"; or record processed message IDs and skip duplicates). More in Module 3.
+
+## Failures: retries and dead-letter queues
+
+If a message keeps failing (bad data, a bug), retrying forever blocks the queue ("poison message"). Standard approach:
+1. Retry a few times with **backoff**.
+2. Then move it to a <Term k="dead-letter-queue">**dead-letter queue (DLQ)**</Term> for humans to inspect.
+3. Alert when the DLQ isn't empty.
+
+## Back-pressure
+
+If producers are **always** faster than consumers, the queue grows forever: memory/disk fills, and messages wait hours. A queue absorbs **spikes**, not a permanent mismatch. Watch **queue depth** and **message age**, auto-scale consumers, and if needed, slow producers down (reject or rate-limit at the edge).
+
+<Callout type="interview">
+Reach for a queue whenever you hear: "slow", "send notifications", "process upload", "spiky traffic", "multiple services react to one event". Say: "The API writes the order and publishes an `order_placed` event to **Kafka**; email, inventory and analytics consume it independently. Delivery is **at-least-once**, so consumers are **idempotent**. Failed messages go to a **DLQ**."
+</Callout>
+
+<Takeaways>
+- Queues **decouple** producers and consumers, **level load spikes** and enable **async** processing.
+- **Work queue** = each message to one worker. **Pub/sub** = each subscriber gets a copy.
+- **Kafka** is a durable, partitioned, replayable log with ordering per key.
+- Most systems are **at-least-once** → make consumers **idempotent**.
+- Use **retries with backoff + DLQ**; monitor **queue depth** for back-pressure.
+</Takeaways>
+
+<Quiz
+  id="queues"
+  questions={[
+    { q: 'After a user places an order you must send an email, update inventory and log analytics. Best pattern?', options: ['Do all three synchronously in the API', 'Publish an order_placed event; each service subscribes (pub/sub)', 'Write to three databases in a loop', 'Use a cron job every hour'], answer: 1, explain: 'One event, many independent consumers. The order API stays fast and decoupled.' },
+    { q: 'Why can a message be processed twice with at-least-once delivery?', options: ['Queues are buggy', 'A worker can finish the work but crash before acknowledging, so it’s redelivered', 'Producers always send twice', 'Kafka duplicates everything'], answer: 1, explain: 'No ack → the queue assumes failure and redelivers. Hence: idempotent consumers.' },
+    { q: 'What does a dead-letter queue hold?', options: ['Messages from deleted users', 'Messages that failed processing too many times', 'Old Kafka offsets', 'Encrypted messages'], answer: 1, explain: 'Poison messages are parked there so they don’t block the main queue.' },
+    { q: 'You need all events for a given user processed in order. In Kafka you should…', options: ['Use one partition for the whole topic', 'Use user_id as the message key so a user’s events go to the same partition', 'Use random keys', 'Use many consumer groups'], answer: 1, explain: 'Ordering is guaranteed within a partition; keying by user keeps a user’s events together.' },
+    { q: 'Producers send 1,000 msg/s permanently, consumers handle 600 msg/s. What happens?', options: ['The queue absorbs it forever', 'The backlog grows without limit; you must scale consumers or slow producers', 'Messages are processed faster', 'Nothing'], answer: 1, explain: 'Queues smooth spikes; they don’t fix a sustained capacity gap.' },
+  ]}
+/>
