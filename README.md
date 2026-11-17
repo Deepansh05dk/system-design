@@ -41,6 +41,15 @@ src/data/                 modules, glossary, flashcards, practice scenarios
 
 Lessons use components without imports, e.g. `<Callout type="why">`, `<ArchFlow …/>`, `<Quiz …/>`.
 
+## Install as a phone app (PWA)
+
+The site is an installable, offline-capable web app: manifest + icons (`public/icons`, `src/pages/manifest.webmanifest.ts`)
+and a service worker generated after every build (`scripts/gen-sw.mjs`) that precaches every page and asset.
+
+- **Android / Chrome:** tap the **📲 Install app** button, or browser menu → *Install app*.
+- **iPhone / iPad:** open in **Safari** → Share → **Add to Home Screen**.
+- After the first visit the whole course works offline; progress is stored on the device.
+
 ## Deploy
 
 Any static host works (Vercel, Netlify, Cloudflare Pages: build command `npm run build`, output `dist`).

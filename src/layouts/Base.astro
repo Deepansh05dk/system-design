@@ -22,6 +22,13 @@ const fullTitle = title === 'System Design Course' ? title : `${title} · System
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content={description} />
     <link rel="icon" type="image/svg+xml" href={url('favicon.svg')} />
+    <link rel="manifest" href={url('manifest.webmanifest')} />
+    <link rel="apple-touch-icon" href={url('icons/apple-touch-icon.png')} />
+    <meta name="theme-color" content="#6366f1" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="SysDesign" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -55,8 +62,19 @@ const fullTitle = title === 'System Design Course' ? title : `${title} · System
         <a href={url('practice')}>Practice</a>
         <a href={url('final-exam')}>Final Exam</a>
       </nav>
+      <button class="install-btn" id="install-btn" hidden>📲 <span>Install app</span></button>
       <button class="icon-btn" id="theme-btn" aria-label="Toggle dark mode" title="Toggle theme"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"></path></svg></button>
     </header>
+
+    <div class="ios-tip" id="ios-tip" hidden role="dialog" aria-label="Install on iPhone">
+      <button class="ios-close" id="ios-close" aria-label="Close">✕</button>
+      <b>Install on iPhone / iPad</b>
+      <ol>
+        <li>Open this page in <b>Safari</b></li>
+        <li>Tap the <b>Share</b> button <span class="ios-ico">⬆️</span></li>
+        <li>Choose <b>Add to Home Screen</b></li>
+      </ol>
+    </div>
 
     <div class="shell">
       <aside class="sidebar" id="sidebar">
@@ -68,6 +86,13 @@ const fullTitle = title === 'System Design Course' ? title : `${title} · System
       </main>
     </div>
 
+    <script is:inline define:vars={{ swUrl: url('sw.js'), scope: url('/') }}>
+      if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register(swUrl, { scope }).catch(() => {});
+        });
+      }
+    </script>
     <script>
       const root = document.documentElement;
       document.getElementById('theme-btn')?.addEventListener('click', () => {
@@ -80,6 +105,39 @@ const fullTitle = title === 'System Design Course' ? title : `${title} · System
           localStorage.setItem('theme', next);
         } catch {}
       });
+      // ----- install as an app -----
+      const installBtn = document.getElementById('install-btn') as HTMLButtonElement | null;
+      const iosTip = document.getElementById('ios-tip');
+      const standalone =
+        window.matchMedia('(display-mode: standalone)').matches || (navigator as unknown as { standalone?: boolean }).standalone === true;
+      const ua = navigator.userAgent;
+      const isIos = /iphone|ipad|ipod/i.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+      let deferred: (Event & { prompt: () => Promise<void>; userChoice: Promise<{ outcome: string }> }) | null = null;
+      if (!standalone && installBtn) {
+        window.addEventListener('beforeinstallprompt', (e) => {
+          e.preventDefault();
+          deferred = e as typeof deferred;
+          installBtn.hidden = false;
+        });
+        if (isIos) installBtn.hidden = false;
+        installBtn.addEventListener('click', async () => {
+          if (deferred) {
+            await deferred.prompt();
+            await deferred.userChoice;
+            deferred = null;
+            installBtn.hidden = true;
+          } else if (iosTip) {
+            iosTip.hidden = !iosTip.hidden;
+          }
+        });
+        window.addEventListener('appinstalled', () => {
+          installBtn.hidden = true;
+        });
+      }
+      document.getElementById('ios-close')?.addEventListener('click', () => {
+        if (iosTip) iosTip.hidden = true;
+      });
+
       const sidebar = document.getElementById('sidebar');
       const scrim = document.getElementById('scrim');
       const toggle = () => {
@@ -147,6 +205,48 @@ const fullTitle = title === 'System Design Course' ? title : `${title} · System
       .menu-btn {
         display: none;
       }
+      .install-btn {
+        border: 1px solid var(--accent);
+        background: var(--accent-soft);
+        color: var(--accent-text);
+        border-radius: 9px;
+        height: 36px;
+        padding: 0 0.8rem;
+        font-weight: 650;
+        font-size: 0.85rem;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .install-btn[hidden] {
+        display: none;
+      }
+      .ios-tip {
+        position: fixed;
+        top: 68px;
+        right: 12px;
+        z-index: 60;
+        width: min(320px, calc(100vw - 24px));
+        background: var(--surface);
+        border: 1px solid var(--border-strong);
+        border-radius: 14px;
+        padding: 0.9rem 1rem;
+        box-shadow: var(--shadow);
+        font-size: 0.92rem;
+      }
+      .ios-tip[hidden] {
+        display: none;
+      }
+      .ios-tip ol {
+        margin: 0.4rem 0 0;
+        padding-left: 1.2rem;
+      }
+      .ios-close {
+        float: right;
+        border: none;
+        background: none;
+        color: var(--text-faint);
+        cursor: pointer;
+      }
       .shell {
         display: flex;
         min-height: calc(100vh - 60px);
@@ -177,7 +277,10 @@ const fullTitle = title === 'System Design Course' ? title : `${title} · System
         .top-links {
           display: none;
         }
-        #theme-btn {
+        .install-btn {
+          margin-left: auto;
+        }
+        .install-btn[hidden] + #theme-btn {
           margin-left: auto;
         }
         .sidebar {

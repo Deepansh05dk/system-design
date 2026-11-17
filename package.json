@@ -10,7 +10,8 @@
     "check": "astro check",
     "gen": "node scripts/gen-wrappers.mjs",
     "prebuild": "node scripts/gen-wrappers.mjs && node scripts/validate-content.mjs",
-    "predev": "node scripts/gen-wrappers.mjs"
+    "predev": "node scripts/gen-wrappers.mjs",
+    "postbuild": "node scripts/gen-sw.mjs"
   },
   "dependencies": {
     "@astrojs/mdx": "^4.3.14",
