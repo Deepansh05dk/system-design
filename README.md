@@ -49,6 +49,7 @@ and a service worker generated after every build (`scripts/gen-sw.mjs`) that pre
 - **Android / Chrome:** tap the **📲 Install app** button, or browser menu → *Install app*.
 - **iPhone / iPad:** open in **Safari** → Share → **Add to Home Screen**.
 - After the first visit the whole course works offline; progress is stored on the device.
+- The top bar shows **✓ Offline ready** once every page is saved. The download is throttled, retried and resumes on every visit if interrupted.
 
 ## Deploy
 

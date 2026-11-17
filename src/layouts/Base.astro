@@ -62,8 +62,11 @@ const fullTitle = title === 'System Design Course' ? title : `${title} · System
         <a href={url('practice')}>Practice</a>
         <a href={url('final-exam')}>Final Exam</a>
       </nav>
+      <div class="top-actions">
+        <button class="offline-chip" id="offline-chip" hidden aria-live="polite"></button>
       <button class="install-btn" id="install-btn" hidden>📲 <span>Install app</span></button>
       <button class="icon-btn" id="theme-btn" aria-label="Toggle dark mode" title="Toggle theme"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"></path></svg></button>
+      </div>
     </header>
 
     <div class="ios-tip" id="ios-tip" hidden role="dialog" aria-label="Install on iPhone">
@@ -88,9 +91,40 @@ const fullTitle = title === 'System Design Course' ? title : `${title} · System
 
     <script is:inline define:vars={{ swUrl: url('sw.js'), scope: url('/') }}>
       if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-        window.addEventListener('load', () => {
-          navigator.serviceWorker.register(swUrl, { scope }).catch(() => {});
+        const chip = document.getElementById('offline-chip');
+        const render = (m) => {
+          if (!chip) return;
+          chip.hidden = false;
+          chip.className = 'offline-chip';
+          if (m.complete) {
+            chip.classList.add('ok');
+            chip.textContent = '✓ Offline ready';
+            chip.title = 'All ' + m.total + ' files are saved on this device. The whole course works without internet.';
+          } else if (m.running) {
+            chip.classList.add('busy');
+            chip.textContent = '⬇ Saving offline ' + Math.round((m.done / m.total) * 100) + '%';
+            chip.title = 'Downloading the course for offline use (' + m.done + '/' + m.total + '). Keep the app open.';
+          } else {
+            chip.classList.add('warn');
+            chip.textContent = '⚠ Tap to finish offline download';
+            chip.title = m.done + '/' + m.total + ' files saved. Some downloads failed; tap to retry.';
+          }
+        };
+        const ask = async () => {
+          try {
+            const reg = await navigator.serviceWorker.ready;
+            (reg.active || navigator.serviceWorker.controller)?.postMessage({ type: 'precache' });
+          } catch {}
+        };
+        navigator.serviceWorker.addEventListener('message', (e) => {
+          if (e.data && e.data.type === 'precache-status') render(e.data);
         });
+        chip?.addEventListener('click', ask);
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register(swUrl, { scope }).then(ask).catch(() => {});
+        });
+        // a new service worker took over: ask it to finish downloading
+        navigator.serviceWorker.addEventListener('controllerchange', ask);
       }
     </script>
     <script>
@@ -217,6 +251,43 @@ const fullTitle = title === 'System Design Course' ? title : `${title} · System
         cursor: pointer;
         white-space: nowrap;
       }
+      .offline-chip {
+        border: 1px solid var(--border-strong);
+        background: var(--surface);
+        color: var(--text-soft);
+        border-radius: 999px;
+        height: 30px;
+        padding: 0 0.75rem;
+        font-size: 0.78rem;
+        font-weight: 650;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .top-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-left: 0.4rem;
+        flex-shrink: 0;
+      }
+      .offline-chip[hidden] {
+        display: none;
+      }
+      .offline-chip.ok {
+        border-color: var(--good);
+        background: var(--good-soft);
+        color: var(--good);
+      }
+      .offline-chip.busy {
+        border-color: var(--info);
+        background: var(--info-soft);
+        color: var(--info);
+      }
+      .offline-chip.warn {
+        border-color: var(--warn);
+        background: var(--warn-soft);
+        color: var(--warn);
+      }
       .install-btn[hidden] {
         display: none;
       }
@@ -277,10 +348,7 @@ const fullTitle = title === 'System Design Course' ? title : `${title} · System
         .top-links {
           display: none;
         }
-        .install-btn {
-          margin-left: auto;
-        }
-        .install-btn[hidden] + #theme-btn {
+        .top-actions {
           margin-left: auto;
         }
         .sidebar {

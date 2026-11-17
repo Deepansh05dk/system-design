@@ -31,33 +31,90 @@ const CACHE = 'sd-' + VERSION;
 const RUNTIME = 'sd-runtime';
 const SCOPE = new URL(self.registration.scope);
 const PRECACHE = ${JSON.stringify(urls)};
+const CONCURRENCY = 5;
+const abs = (rel) => new URL(rel, SCOPE).href;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------- progress reporting ----------
+let state = { done: 0, total: PRECACHE.length, failed: 0, running: false, complete: false };
+async function broadcast() {
+  const all = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' });
+  all.forEach((c) => c.postMessage({ type: 'precache-status', ...state }));
+}
+
+// ---------- download everything, a few files at a time, with retries ----------
+// Resumable: only files missing from this version's cache are fetched, so it is safe
+// to call again on every visit if an earlier attempt was interrupted or had failures.
+let filling = null;
+function fill() {
+  if (filling) return filling;
+  filling = (async () => {
+    const cache = await caches.open(CACHE);
+    const missing = [];
+    for (const rel of PRECACHE) if (!(await cache.match(abs(rel)))) missing.push(rel);
+    state = { done: PRECACHE.length - missing.length, total: PRECACHE.length, failed: 0, running: missing.length > 0, complete: missing.length === 0 };
+    await broadcast();
+    // shared assets and key pages first, lessons after
+    const rank = (r) => (r === '' ? 0 : r.includes('_astro/') || r.startsWith('icons/') ? 1 : r.endsWith('/') && !r.startsWith('learn/') ? 2 : 3);
+    const queue = missing.sort((a, b) => rank(a) - rank(b));
+    async function worker() {
+      while (queue.length) {
+        const rel = queue.shift();
+        let ok = false;
+        for (let attempt = 0; attempt < 4 && !ok; attempt++) {
+          try {
+            const res = await fetch(abs(rel), { cache: 'reload' });
+            if (res.ok && !res.redirected) {
+              await cache.put(abs(rel), res);
+              ok = true;
+            }
+          } catch {}
+          if (!ok) await sleep(400 * 2 ** attempt);
+        }
+        if (ok) state.done++;
+        else state.failed++;
+        await broadcast();
+      }
+    }
+    await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+    state.running = false;
+    state.complete = state.done === state.total;
+    if (state.complete) {
+      // only now is it safe to drop older versions
+      const keys = await caches.keys();
+      await Promise.all(keys.filter((k) => k.startsWith('sd-') && k !== CACHE && k !== RUNTIME).map((k) => caches.delete(k)));
+    }
+    await broadcast();
+  })().finally(() => {
+    filling = null;
+  });
+  return filling;
+}
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    (async () => {
-      const cache = await caches.open(CACHE);
-      // one failed file must not abort the whole install
-      await Promise.allSettled(PRECACHE.map((rel) => cache.add(new Request(new URL(rel, SCOPE), { cache: 'reload' }))));
-      await self.skipWaiting();
-    })(),
-  );
+  // stay fast and unbreakable: the real download happens after activation
+  event.waitUntil(self.skipWaiting());
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
-      const keys = await caches.keys();
-      await Promise.all(keys.filter((k) => k.startsWith('sd-') && k !== CACHE && k !== RUNTIME).map((k) => caches.delete(k)));
       await self.clients.claim();
+      await fill();
     })(),
   );
 });
 
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'precache') event.waitUntil(fill());
+});
+
+// ---------- serving ----------
 async function fromCache(request) {
   const opts = { ignoreSearch: true };
   const hit = await caches.match(request, opts);
   if (hit) return hit;
-  // "/learn/x" (no slash) is cached as "/learn/x/"
+  // "/learn/x" (no trailing slash) is stored as "/learn/x/"
   const u = new URL(request.url);
   if (!u.pathname.endsWith('/') && !/\\.[a-z0-9]+$/i.test(u.pathname)) {
     u.pathname += '/';
@@ -66,25 +123,37 @@ async function fromCache(request) {
   return undefined;
 }
 
+function offlinePage() {
+  const home = SCOPE.pathname;
+  return new Response(
+    '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Offline</title>' +
+      '<body style="font-family:system-ui,sans-serif;max-width:30rem;margin:15vh auto;padding:0 1.2rem;line-height:1.6">' +
+      '<h1>You are offline</h1><p>This page has not been saved on your device yet. Connect to the internet once and open the app; ' +
+      'it will download the whole course for offline use (look for the <b>Offline ready</b> badge at the top).</p>' +
+      '<p><a href="' + home + '">Go to the home page</a></p></body>',
+    { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+  );
+}
+
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   const sameOrigin = url.origin === self.location.origin;
 
-  // Pages: network first (fresh content when online), cache when offline
+  // Pages: prefer the saved copy when the network is slow/offline; refresh it when online
   if (req.mode === 'navigate' && sameOrigin) {
     event.respondWith(
       (async () => {
         try {
-          const res = await Promise.race([fetch(req), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 4000))]);
-          if (res && res.ok) {
+          const res = await Promise.race([fetch(req), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3500))]);
+          if (res && res.ok && !res.redirected) {
             const copy = res.clone();
             caches.open(RUNTIME).then((c) => c.put(req, copy));
           }
           return res;
         } catch {
-          return (await fromCache(req)) || (await caches.match(new URL('', SCOPE).href)) || Response.error();
+          return (await fromCache(req)) || offlinePage();
         }
       })(),
     );
@@ -93,15 +162,21 @@ self.addEventListener('fetch', (event) => {
 
   // Fingerprinted build assets never change: cache first
   if (sameOrigin && url.pathname.includes('/_astro/')) {
-    event.respondWith(fromCache(req).then((hit) => hit || fetch(req).then((res) => {
-      const copy = res.clone();
-      caches.open(RUNTIME).then((c) => c.put(req, copy));
-      return res;
-    })));
+    event.respondWith(
+      fromCache(req).then(
+        (hit) =>
+          hit ||
+          fetch(req).then((res) => {
+            const copy = res.clone();
+            caches.open(RUNTIME).then((c) => c.put(req, copy));
+            return res;
+          }),
+      ),
+    );
     return;
   }
 
-  // Everything else (icons, manifest, Google Fonts): serve cached, refresh in background
+  // Everything else (icons, manifest, Google Fonts): serve saved copy, refresh in background
   if (sameOrigin || url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') {
     event.respondWith(
       (async () => {
